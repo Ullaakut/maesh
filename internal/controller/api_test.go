@@ -170,7 +170,7 @@ func TestGetMeshNodes(t *testing.T) {
 			api := NewAPI(9000, &config, nil, clientMock, "foo")
 
 			res := httptest.NewRecorder()
-			req := testhelpers.MustNewRequest(http.MethodGet, "/api/status/readiness", nil)
+			req := testhelpers.MustNewRequest(http.MethodGet, "/api/status/nodes", nil)
 
 			api.getMeshNodes(res, req)
 
@@ -182,23 +182,109 @@ func TestGetMeshNodes(t *testing.T) {
 
 			if test.expectedStatusCode != http.StatusOK {
 				assert.Contains(t, string(body), test.expectedErrorResponse)
-			} else {
-				var podInfoList []podInfo
-				err := json.Unmarshal(body, &podInfoList)
-				require.NoError(t, err)
-
-				assert.Equal(t, podInfoList, test.expectedPodInfoList)
+				return
 			}
+
+			var podInfoList []podInfo
+			err = json.Unmarshal(body, &podInfoList)
+			require.NoError(t, err)
+
+			assert.Equal(t, podInfoList, test.expectedPodInfoList)
+		})
+	}
+}
+
+func TestGetMeshNodeConfig(t *testing.T) {
+	testCases := []struct {
+		desc string
+
+		// HTTP request input.
+		reqNode string
+
+		// Get pod call.
+		pod       *v1.Pod
+		podExists bool
+		getPodErr error
+
+		// Get configuration request on pod.
+		getConfigResp []byte
+		getConfigErr  error
+
+		expectedConfiguration []byte
+		expectedErrorResponse string
+		expectedStatusCode    int
+	}{
+		// {
+		// 	desc: "success",
+		// },
+		{
+			desc: "pod does not exist",
+		},
+		// {
+		// 	desc: "get pod error",
+		// },
+		// {
+		// 	desc: "get config error",
+		// },
+	}
+
+	for _, test := range testCases {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			var (
+				calledWithNamespace string
+				calledWithName      string
+			)
+
+			clientMock := &podListerMock{
+				getPod: func(namespace, name string) (*v1.Pod, bool, error) {
+					calledWithNamespace = namespace
+					calledWithName = name
+
+					return test.pod, test.podExists, test.getPodErr
+				},
+			}
+
+			nodeName := "testNode"
+
+			config := safe.Safe{}
+			api := NewAPI(9000, &config, nil, clientMock, "foo")
+
+			res := httptest.NewRecorder()
+			req := testhelpers.MustNewRequest(http.MethodGet, "/api/status/node/"+nodeName+"/configuration", nil)
+
+			api.getMeshNodeConfiguration(res, req)
+
+			assert.Equal(t, "foo", calledWithNamespace)
+			assert.Equal(t, nodeName, calledWithName)
+
+			assert.Equal(t, test.expectedStatusCode, res.Code)
+			body, err := ioutil.ReadAll(res.Body)
+			require.NoError(t, err)
+
+			if test.expectedStatusCode != http.StatusOK {
+				assert.Contains(t, string(body), test.expectedErrorResponse)
+				return
+			}
+
+			assert.Equal(t, test.expectedConfiguration, body)
 		})
 	}
 }
 
 type podListerMock struct {
 	listPodWithOptions func(string, metav1.ListOptions) (*v1.PodList, error)
+	getPod             func(string, string) (*v1.Pod, bool, error)
 }
 
 func (pl *podListerMock) ListPodWithOptions(namespace string, opts metav1.ListOptions) (*v1.PodList, error) {
 	return pl.listPodWithOptions(namespace, opts)
+}
+
+func (pl *podListerMock) GetPod(namespace, name string) (*v1.Pod, bool, error) {
+	return pl.getPod(namespace, name)
 }
 
 // Unimplemented methods below.
@@ -244,10 +330,6 @@ func (pl *podListerMock) GetEndpoints(namespace, name string) (*v1.Endpoints, bo
 }
 
 func (pl *podListerMock) GetEndpointses(namespace string) ([]*v1.Endpoints, error) {
-	panic("implement me")
-}
-
-func (pl *podListerMock) GetPod(namespace, name string) (*v1.Pod, bool, error) {
 	panic("implement me")
 }
 
