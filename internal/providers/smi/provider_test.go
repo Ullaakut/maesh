@@ -3,12 +3,12 @@ package smi
 import (
 	"testing"
 
-	"github.com/containous/maesh/internal/providers/base"
-
 	"github.com/containous/maesh/internal/k8s"
+	"github.com/containous/maesh/internal/providers/base"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	accessv1alpha1 "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	specsv1alpha1 "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
+	splitv1alpha1 "github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -63,6 +63,86 @@ func TestBuildRuleSnippetFromServiceAndMatch(t *testing.T) {
 			ip := "10.0.0.1"
 			actual := provider.buildRuleSnippetFromServiceAndMatch(name, namespace, ip, test.match)
 			assert.Equal(t, test.expected, actual)
+		})
+	}
+}
+
+func TestBuildTrafficSplit(t *testing.T) {
+	ignored := k8s.NewIgnored()
+	ignored.SetMeshNamespace(meshNamespace)
+
+	clientMock := k8s.NewClientMock("mock.yaml")
+
+	provider := New(clientMock, k8s.ServiceTypeHTTP, meshNamespace, nil, ignored)
+
+	testCases := []struct {
+		desc string
+
+		// Arguments.
+		id                  int
+		config              *dynamic.Configuration
+		servicePort         corev1.ServicePort
+		trafficSplit        *splitv1alpha1.TrafficSplit
+		trafficTarget       *accessv1alpha1.TrafficTarget
+		whitelistMiddleware string
+		scheme              string
+
+		// Mock.
+		mockFile string
+
+		// Output.
+		expectedConfig *dynamic.Configuration
+	}{
+		{
+			desc: "endpoint for doesnotexist does not exist",
+
+			mockFile: "mock.yaml",
+
+			trafficSplit: &splitv1alpha1.TrafficSplit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test_name",
+					Namespace: "test_namespace",
+				},
+				Spec: splitv1alpha1.TrafficSplitSpec{
+					Backends: []splitv1alpha1.TrafficSplitBackend{
+						{
+							Service: "doesnotexist",
+						},
+					},
+				},
+			},
+		},
+		{
+			desc: "service does not exist",
+
+			mockFile: "mock.yaml",
+
+			trafficSplit: &splitv1alpha1.TrafficSplit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test_name",
+					Namespace: "test_namespace",
+				},
+				Spec: splitv1alpha1.TrafficSplitSpec{
+					Backends: []splitv1alpha1.TrafficSplitBackend{
+						{
+							Service: "endpointbutnoservice",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, test := range testCases {
+		test := test
+		t.Run(test.desc, func(t *testing.T) {
+			t.Parallel()
+
+			config := test.config
+
+			provider.buildTrafficSplit(config, test.trafficSplit, test.servicePort, test.id, test.trafficTarget, test.whitelistMiddleware, test.scheme)
+
+			assert.Equal(t, test.expectedConfig, config)
 		})
 	}
 }
