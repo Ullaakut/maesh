@@ -1,0 +1,63 @@
+---
+kind: TrafficTarget
+apiVersion: access.smi-spec.io/v1alpha1
+metadata:
+  name: example-traffic-target
+destination:
+  kind: ServiceAccount
+  name: api-service
+  namespace: default
+sources:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: default
+specs:
+  - kind: TCPRoute
+    name: api-service-routes
+
+---
+kind: TCPRoute
+apiVersion: specs.smi-spec.io/v1alpha1
+metadata:
+  name: api-service-routes
+
+---
+apiVersion: v1
+kind: Endpoints
+metadata:
+  name: demo-service
+subsets:
+  - addresses:
+      - ip: 10.1.1.50
+        targetRef:
+          name: example
+          namespace: default
+    ports:
+      - port: 50
+
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: example
+spec:
+  serviceAccountName: api-service
+  containers:
+    - name: example
+      image: busybox
+status:
+  podIP: "10.4.3.2"
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: demo-service
+  annotations:
+    maesh.containo.us/traffic-type: tcp
+spec:
+  clusterIP: 10.1.0.1
+  ports:
+    - protocol: TCP
+      port: 80
+      name: web

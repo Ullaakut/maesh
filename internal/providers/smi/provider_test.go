@@ -1448,6 +1448,62 @@ func TestBuildConfiguration(t *testing.T) {
 			},
 		},
 		{
+			desc:     "configuration build with TCP service",
+			mockFile: "build_configuration_tcp_service.yaml",
+			expected: &dynamic.Configuration{
+				TCP: &dynamic.TCPConfiguration{
+					Routers: map[string]*dynamic.TCPRouter{
+						"demo-servi-default-80-example-tr-default-777d77ce760cb056": {
+							EntryPoints: []string{"tcp-0"},
+							Service:     "demo-servi-default-80-example-tr-default-777d77ce760cb056",
+							Rule:        "HostSNI(`*`)",
+						},
+					},
+					Services: map[string]*dynamic.TCPService{
+						"demo-servi-default-80-example-tr-default-777d77ce760cb056": {
+							LoadBalancer: &dynamic.TCPServersLoadBalancer{
+								Servers: []dynamic.TCPServer{
+									{
+										Address: "10.1.1.50:50",
+									},
+								},
+							},
+						},
+					},
+				},
+				HTTP: &dynamic.HTTPConfiguration{
+					Middlewares: map[string]*dynamic.Middleware{
+						"smi-block-all-middleware": {
+							IPWhiteList: &dynamic.IPWhiteList{
+								SourceRange: []string{"255.255.255.255"},
+							},
+						},
+					},
+					Routers: map[string]*dynamic.Router{
+						"readiness": {
+							EntryPoints: []string{"readiness"},
+							Service:     "readiness",
+							Rule:        "Path(`/ping`)",
+						},
+					},
+					Services: map[string]*dynamic.Service{
+						"readiness": {
+							LoadBalancer: &dynamic.ServersLoadBalancer{
+								PassHostHeader: base.Bool(true),
+								Servers: []dynamic.Server{
+									{
+										URL:    "http://127.0.0.1:8080",
+										Scheme: "",
+										Port:   "",
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			desc:           "simple configuration build with endpoint error",
 			mockFile:       "build_configuration_http_service.yaml",
 			expected:       nil,
