@@ -71,10 +71,6 @@ func TestBuildTrafficSplit(t *testing.T) {
 	ignored := k8s.NewIgnored()
 	ignored.SetMeshNamespace(meshNamespace)
 
-	clientMock := k8s.NewClientMock("mock.yaml")
-
-	provider := New(clientMock, k8s.ServiceTypeHTTP, meshNamespace, nil, ignored)
-
 	testCases := []struct {
 		desc string
 
@@ -87,35 +83,38 @@ func TestBuildTrafficSplit(t *testing.T) {
 		whitelistMiddleware string
 		scheme              string
 
+		endpointsError bool
+		serviceError   bool
+
 		// Mock.
 		mockFile string
 
 		// Output.
 		expectedConfig *dynamic.Configuration
 	}{
+		// {
+		// 	desc: "endpoint for doesnotexist does not exist",
+		//
+		// 	mockFile: "build_traffic_split.yaml",
+		//
+		// 	trafficSplit: &splitv1alpha1.TrafficSplit{
+		// 		ObjectMeta: metav1.ObjectMeta{
+		// 			Name:      "test_name",
+		// 			Namespace: "test_namespace",
+		// 		},
+		// 		Spec: splitv1alpha1.TrafficSplitSpec{
+		// 			Backends: []splitv1alpha1.TrafficSplitBackend{
+		// 				{
+		// 					Service: "doesnotexist",
+		// 				},
+		// 			},
+		// 		},
+		// 	},
+		// },
 		{
-			desc: "endpoint for doesnotexist does not exist",
+			desc: "service endpointbutnoservice does not exist",
 
-			mockFile: "mock.yaml",
-
-			trafficSplit: &splitv1alpha1.TrafficSplit{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test_name",
-					Namespace: "test_namespace",
-				},
-				Spec: splitv1alpha1.TrafficSplitSpec{
-					Backends: []splitv1alpha1.TrafficSplitBackend{
-						{
-							Service: "doesnotexist",
-						},
-					},
-				},
-			},
-		},
-		{
-			desc: "service does not exist",
-
-			mockFile: "mock.yaml",
+			mockFile: "build_traffic_split.yaml",
 
 			trafficSplit: &splitv1alpha1.TrafficSplit{
 				ObjectMeta: metav1.ObjectMeta{
@@ -138,7 +137,17 @@ func TestBuildTrafficSplit(t *testing.T) {
 		t.Run(test.desc, func(t *testing.T) {
 			t.Parallel()
 
+			clientMock := k8s.NewClientMock(test.mockFile)
+			if test.endpointsError {
+				clientMock.EnableEndpointsError()
+			}
+			if test.serviceError {
+				clientMock.EnableServiceError()
+			}
+
 			config := test.config
+
+			provider := New(clientMock, k8s.ServiceTypeHTTP, meshNamespace, nil, ignored)
 
 			provider.buildTrafficSplit(config, test.trafficSplit, test.servicePort, test.id, test.trafficTarget, test.whitelistMiddleware, test.scheme)
 

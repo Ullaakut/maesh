@@ -19,7 +19,7 @@ metadata:
 destination:
   kind: ServiceAccount
   name: api-service
-  namespace: default
+  namespace: test_namespace
 specs:
 - kind: HTTPRouteGroup
   name: api-service-routes
@@ -28,7 +28,7 @@ specs:
 sources:
 - kind: ServiceAccount
   name: prometheus
-  namespace: default
+  namespace: test_namespace
 
 ---
 kind: TrafficTarget
@@ -38,7 +38,7 @@ metadata:
 destination:
   kind: ServiceAccount
   name: api-service
-  namespace: default
+  namespace: test_namespace
   port: "8080"
 specs:
 - kind: HTTPRouteGroup
@@ -48,10 +48,10 @@ specs:
 sources:
 - kind: ServiceAccount
   name: website-service
-  namespace: default
+  namespace: test_namespace
 - kind: ServiceAccount
   name: payments-service
-  namespace: default
+  namespace: test_namespace
 
 ---
 kind: TrafficTarget
@@ -70,7 +70,7 @@ specs:
 sources:
 - kind: ServiceAccount
   name: prometheus
-  namespace: default
+  namespace: test_namespace
 
 ---
 kind: TrafficTarget
@@ -90,10 +90,10 @@ specs:
 sources:
 - kind: ServiceAccount
   name: website-service
-  namespace: default
+  namespace: test_namespace
 - kind: ServiceAccount
   name: payments-service
-  namespace: default
+  namespace: test_namespace
 
 ---
 kind: TrafficTarget
@@ -112,7 +112,7 @@ specs:
 sources:
 - kind: ServiceAccount
   name: prometheus
-  namespace: default
+  namespace: test_namespace
 
 ---
 kind: TrafficTarget
@@ -132,22 +132,22 @@ specs:
 sources:
 - kind: ServiceAccount
   name: website-service
-  namespace: default
+  namespace: test_namespace
 - kind: ServiceAccount
   name: payments-service
-  namespace: default
+  namespace: test_namespace
 
 ---
 apiVersion: v1
 kind: Endpoints
 metadata:
-  name: demo-service
+  name: endpointbutnoservice
 subsets:
 - addresses:
   - ip: 10.1.1.50
     targetRef:
-      name: endpointbutnoservice
-      namespace: default
+      name: test_service
+      namespace: test_namespace
   ports:
   - port: 50
 
@@ -168,7 +168,7 @@ status:
 apiVersion: v1
 kind: Service
 metadata:
-  name: demo-test
+  name: test_service
 spec:
   clusterIP: 10.1.0.1
   ports:
