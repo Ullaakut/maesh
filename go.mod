@@ -14,6 +14,7 @@ require (
 	github.com/pmezard/go-difflib v1.0.0
 	github.com/sirupsen/logrus v1.4.2
 	github.com/stretchr/testify v1.4.0
+	github.com/tidwall/pretty v1.0.1 // indirect
 	github.com/vdemeester/shakers v0.1.0
 	golang.org/x/sync v0.0.0-20190911185100-cd5d95a43a6e
 	k8s.io/api v0.0.0-20190819141258-3544db3b9e44
