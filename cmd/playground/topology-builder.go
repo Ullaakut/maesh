@@ -162,6 +162,42 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 		}
 	}
 
+	// Attach TrafficSplits to services
+	trafficSplits, err := b.trafficSplitLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list TrafficSplits: %w", err)
+	}
+	for _, trafficSplit := range trafficSplits {
+		k8sSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(trafficSplit.Spec.Service)
+		if err != nil {
+			return nil, fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, trafficSplit.Spec.Service, err)
+		}
+
+		svc := getOrCreateService(topology, k8sSvc)
+
+		backends := make([]TrafficSplitBackend, len(trafficSplit.Spec.Backends))
+		for i, backend := range trafficSplit.Spec.Backends {
+			k8sBackendSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(backend.Service)
+			if err != nil {
+				return nil, fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, backend.Service, err)
+			}
+
+			backends[i] = TrafficSplitBackend{
+				Weight:  backend.Weight,
+				Service: getOrCreateService(topology, k8sBackendSvc),
+			}
+
+		}
+
+		svc.TrafficSplits = append(svc.TrafficSplits, &TrafficSplit{
+			Name:      trafficSplit.Name,
+			Namespace: trafficSplit.Namespace,
+			Service:   svc,
+			Backends:  backends,
+			Specs:     nil,
+		})
+	}
+
 	return topology, nil
 }
 
@@ -263,7 +299,6 @@ func getOrCreateService(topology *Topology, svc *v1.Service) *Service {
 			Ports:          svc.Spec.Ports,
 			ClusterIP:      svc.Spec.ClusterIP,
 			TrafficTargets: make(map[string]*ServiceTrafficTarget),
-			TrafficSplits:  make(map[string]*TrafficSplit),
 		}
 	}
 

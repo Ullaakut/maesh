@@ -37,7 +37,7 @@ type Service struct {
 	ClusterIP   string
 
 	TrafficTargets map[string]*ServiceTrafficTarget
-	TrafficSplits  map[string]*TrafficSplit
+	TrafficSplits  []*TrafficSplit
 }
 
 type ServiceTrafficTarget struct {
@@ -85,6 +85,7 @@ type TrafficSplit struct {
 	Name      string
 	Namespace string
 
+	Service  *Service
 	Backends []TrafficSplitBackend
 	Specs    []*TrafficSpec
 }
@@ -130,11 +131,11 @@ func (t *Topology) Dump() string {
 		}
 
 		if len(service.TrafficTargets) > 0 {
-			s += leftPadf(2, "TrafficTarget:")
+			s += leftPadf(2, "TrafficTargets:")
 			for sa, tt := range service.TrafficTargets {
 				s += leftPadf(3, "[%s] %p", sa, tt)
 				s += leftPadf(4, "Name: %s", tt.Name)
-				s += leftPadf(4, "Service: %p", tt.Service)
+				s += leftPadf(4, "Service: %s/%s", tt.Service.Namespace, tt.Service.Name)
 
 				if len(tt.Sources) > 0 {
 					s += leftPadf(4, "Sources:")
@@ -163,6 +164,22 @@ func (t *Topology) Dump() string {
 
 			}
 		}
+
+		if len(service.TrafficSplits) > 0 {
+			s += leftPadf(2, "TrafficSplits:")
+			for _, ts := range service.TrafficSplits {
+				s += leftPadf(3, "[%s/%s]", ts.Namespace, ts.Name)
+				s += leftPadf(4, "Service: %p", ts.Service)
+
+				if len(ts.Backends) > 0 {
+					s += leftPadf(4, "Backends:")
+					for _, backend := range ts.Backends {
+						s += leftPadf(4, "- weight=%d service=%s/%s ", backend.Weight, backend.Service.Namespace, backend.Service.Name)
+					}
+				}
+
+			}
+		}
 	}
 
 	s += leftPadf(0, "Pods:")
@@ -175,14 +192,14 @@ func (t *Topology) Dump() string {
 		if len(pod.Outgoing) > 0 {
 			s += leftPadf(2, "Outgoing:")
 			for _, out := range pod.Outgoing {
-				s += leftPadf(3, "- %p (name=%s, service=%s)", out, out.Service.Name, out.Name)
+				s += leftPadf(3, "- service=%s traffic-target=%s", out.Service.Name, out.Name)
 			}
 		}
 
 		if len(pod.Incoming) > 0 {
 			s += leftPadf(2, "Incoming:")
 			for _, in := range pod.Incoming {
-				s += leftPadf(3, "- %p (name=%s, service=%s)", in, in.Service.Name, in.Name)
+				s += leftPadf(3, "- service=%s traffic-target=%s", in.Service.Name, in.Name)
 			}
 		}
 
