@@ -85,33 +85,26 @@ func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessC
 }
 
 func (b *TopologyBuilder) Build() (*Topology, error) {
-	topology := Topology{
-		Services:     make(map[NameNamespace]*Service),
-		Pods:         make(map[NameNamespace]*Pod),
-		TrafficSpecs: make(map[NameNamespace]*TrafficSpec),
-	}
-
-	var pods []*v1.Pod
-	var trafficTargets []*v1alpha1.TrafficTarget
-	var err error
-
-	if pods, err = b.podLister.List(labels.Everything()); err != nil {
-		return nil, fmt.Errorf("unable to list Pods: %w", err)
-	}
-
-	if trafficTargets, err = b.trafficTargetLister.List(labels.Everything()); err != nil {
-		return nil, fmt.Errorf("unable to list TrafficTargets: %w", err)
-	}
+	topology := NewTopology()
 
 	// Group pods by service account.
-	podsBySa := make(map[NameNamespace][]*v1.Pod)
-	for _, pod := range pods {
-		saKey := NameNamespace{pod.Spec.ServiceAccountName, pod.Namespace}
-
-		podsBySa[saKey] = append(podsBySa[saKey], pod)
+	pods, err := b.podLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list Pods: %w", err)
 	}
+	podsBySa := b.groupPodsByServiceAccount(pods)
 
-	// Create Services and serviceTrafficTargets.
+	// For each TrafficTarget:
+	// - Create a new "Service" for each kubernetes destination pods services. Destination pods are the all the pods
+	//   under the current service which have the service account mention in TrafficTarget.Destination.
+	// - Create a new "Pod" for each pod found while traversing the destination pods and source pods[2]
+	// - Create a new "ServiceTrafficTarget" for each new "Service" and link them together.
+	// - And Finally, we link "Pod"s with the "ServiceTrafficTarget". In the Pod.Outgoing for source pods and in
+	// Pod.Incoming for destination pods.
+	trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list TrafficTargets: %w", err)
+	}
 	for _, trafficTarget := range trafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
 
@@ -122,44 +115,21 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 		}
 
 		// Build traffic target sources.
-		sources := make(map[NameNamespace]ServiceTrafficTargetSource)
-		for _, source := range trafficTarget.Sources {
-			srcSaKey := NameNamespace{source.Name, source.Namespace}
-			pods := podsBySa[srcSaKey]
-
-			srcPods := make([]*Pod, len(pods))
-			for i, pod := range pods {
-				srcPods[i] = getOrCreatePod(&topology, pod)
-			}
-
-			sources[srcSaKey] = ServiceTrafficTargetSource{
-				ServiceAccount: source.Name,
-				Namespace:      source.Namespace,
-				Pods:           srcPods,
-			}
-		}
+		sources := b.buildTrafficTargetSources(topology, trafficTarget, podsBySa)
 
 		for service, pods := range podsBySvc {
-			svc := getOrCreateService(&topology, service)
+			svc := getOrCreateService(topology, service)
 
 			// Find out who are the destination pods.
 			destPods := make([]*Pod, len(pods))
 			for i, pod := range pods {
-				destPods[i] = getOrCreatePod(&topology, pod)
+				destPods[i] = getOrCreatePod(topology, pod)
 			}
 
 			// Find out which port can be used on the destination service.
-			var destPorts []int32
-			if trafficTarget.Destination.Port != "" {
-				port, err := strconv.ParseInt(trafficTarget.Destination.Port, 10, 32)
-				if err != nil {
-					return nil, fmt.Errorf("destination port of TrafficTarget %q is not a valid port: %w", trafficTarget.Name, err)
-				}
-				destPorts = []int32{int32(port)}
-			} else {
-				for _, port := range service.Spec.Ports {
-					destPorts = append(destPorts, port.TargetPort.IntVal)
-				}
+			destPorts, err := b.getTrafficTargetDestinationPorts(service, trafficTarget)
+			if err != nil {
+				return nil, fmt.Errorf("unable to find TrafficTarget %q destination ports for service %s: %w", trafficTarget.Name, service.Name, err)
 			}
 
 			dest := ServiceTrafficTargetDestination{
@@ -192,11 +162,12 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 		}
 	}
 
-	return &topology, nil
+	return topology, nil
 }
 
 func (b *TopologyBuilder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {
 	podsBySvc := make(map[*v1.Service][]*v1.Pod)
+
 	for _, pod := range pods {
 		services, err := b.svcLister.GetPodServices(pod)
 		if err != nil {
@@ -209,6 +180,58 @@ func (b *TopologyBuilder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]
 	}
 
 	return podsBySvc, nil
+}
+
+func (b *TopologyBuilder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameNamespace][]*v1.Pod {
+	podsBySa := make(map[NameNamespace][]*v1.Pod)
+
+	for _, pod := range pods {
+		saKey := NameNamespace{pod.Spec.ServiceAccountName, pod.Namespace}
+
+		podsBySa[saKey] = append(podsBySa[saKey], pod)
+	}
+
+	return podsBySa
+}
+
+func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *v1alpha1.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) map[NameNamespace]ServiceTrafficTargetSource {
+	sources := make(map[NameNamespace]ServiceTrafficTargetSource)
+
+	for _, source := range tt.Sources {
+		srcSaKey := NameNamespace{source.Name, source.Namespace}
+		pods := podsBySa[srcSaKey]
+
+		srcPods := make([]*Pod, len(pods))
+		for i, pod := range pods {
+			srcPods[i] = getOrCreatePod(t, pod)
+		}
+
+		sources[srcSaKey] = ServiceTrafficTargetSource{
+			ServiceAccount: source.Name,
+			Namespace:      source.Namespace,
+			Pods:           srcPods,
+		}
+	}
+
+	return sources
+}
+
+func (b *TopologyBuilder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *v1alpha1.TrafficTarget) ([]int32, error) {
+	var destPorts []int32
+
+	if tt.Destination.Port != "" {
+		port, err := strconv.ParseInt(tt.Destination.Port, 10, 32)
+		if err != nil {
+			return nil, fmt.Errorf("destination port of TrafficTarget %q is not a valid port: %w", tt.Name, err)
+		}
+		destPorts = []int32{int32(port)}
+	} else {
+		for _, port := range svc.Spec.Ports {
+			destPorts = append(destPorts, port.TargetPort.IntVal)
+		}
+	}
+
+	return destPorts, nil
 }
 
 func getOrCreatePod(topology *Topology, pod *v1.Pod) *Pod {

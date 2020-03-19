@@ -19,6 +19,15 @@ type Topology struct {
 	TrafficSpecs map[NameNamespace]*TrafficSpec
 }
 
+func NewTopology() *Topology {
+	return &Topology{
+		Services:     make(map[NameNamespace]*Service),
+		Pods:         make(map[NameNamespace]*Pod),
+		TrafficSpecs: make(map[NameNamespace]*TrafficSpec),
+	}
+
+}
+
 type Service struct {
 	Name        string
 	Namespace   string
