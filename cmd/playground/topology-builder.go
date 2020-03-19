@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"strconv"
 	"time"
@@ -31,7 +33,7 @@ type TopologyBuilder struct {
 	httpRouteGroupLister spec.HTTPRouteGroupLister
 }
 
-func NewTopologyBuilder(k8sClient k8s.Interface, smiAccessClient accessclient.Interface, smiSpecClient specsclient.Interface, smiSplitClient splitclient.Interface) *TopologyBuilder {
+func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessClient accessclient.Interface, smiSpecClient specsclient.Interface, smiSplitClient splitclient.Interface) (*TopologyBuilder, error) {
 	k8sInformerFact := informers.NewSharedInformerFactoryWithOptions(k8sClient, 5*time.Minute)
 	smiAccessInformerFact := accessinformer.NewSharedInformerFactoryWithOptions(smiAccessClient, 5*time.Minute)
 	smiSpecInformerFact := specsinformer.NewSharedInformerFactoryWithOptions(smiSpecClient, 5*time.Minute)
@@ -44,6 +46,34 @@ func NewTopologyBuilder(k8sClient k8s.Interface, smiAccessClient accessclient.In
 	httpRouteGroupLister := smiSpecInformerFact.Specs().V1alpha1().HTTPRouteGroups().Lister()
 	trafficSplitLister := smiSplitInformerFact.Split().V1alpha2().TrafficSplits().Lister()
 
+	k8sInformerFact.Start(ctx.Done())
+	for _, ok := range k8sInformerFact.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, errors.New("unable to start k8s informers")
+		}
+	}
+
+	smiAccessInformerFact.Start(ctx.Done())
+	for _, ok := range smiAccessInformerFact.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, errors.New("unable to start smi access informers")
+		}
+	}
+
+	smiSpecInformerFact.Start(ctx.Done())
+	for _, ok := range smiSpecInformerFact.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, errors.New("unable to start smi spec informers")
+		}
+	}
+
+	smiSplitInformerFact.Start(ctx.Done())
+	for _, ok := range smiSplitInformerFact.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, errors.New("unable to start smi split informers")
+		}
+	}
+
 	return &TopologyBuilder{
 		svcLister:            svcLister,
 		epLister:             epLister,
@@ -51,12 +81,15 @@ func NewTopologyBuilder(k8sClient k8s.Interface, smiAccessClient accessclient.In
 		trafficTargetLister:  trafficTargetLister,
 		trafficSplitLister:   trafficSplitLister,
 		httpRouteGroupLister: httpRouteGroupLister,
-	}
+	}, nil
 }
 
-//
 func (b *TopologyBuilder) Build() (*Topology, error) {
-	var topology Topology
+	topology := Topology{
+		Services:     make(map[NameNamespace]*Service),
+		Pods:         make(map[NameNamespace]*Pod),
+		TrafficSpecs: make(map[NameNamespace]*TrafficSpec),
+	}
 
 	var pods []*v1.Pod
 	var trafficTargets []*v1alpha1.TrafficTarget
@@ -81,30 +114,22 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 	// Create Services and serviceTrafficTargets.
 	for _, trafficTarget := range trafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
-		destK8sPods := podsBySa[destSaKey]
 
-		// Group pods by service.
-		podsBySvc := make(map[*v1.Service][]*v1.Pod)
-		for _, pod := range destK8sPods {
-			services, err := b.svcLister.GetPodServices(pod)
-			if err != nil {
-				return nil, fmt.Errorf("unable to get pod %q services: %w", pod.Name, err)
-			}
-
-			for _, service := range services {
-				podsBySvc[service] = append(podsBySvc[service], pod)
-			}
+		// Group destination pods by service.
+		podsBySvc, err := b.groupPodsByService(podsBySa[destSaKey])
+		if err != nil {
+			return nil, fmt.Errorf("unable to group pods by service: %w", err)
 		}
 
 		// Build traffic target sources.
 		sources := make(map[NameNamespace]ServiceTrafficTargetSource)
 		for _, source := range trafficTarget.Sources {
 			srcSaKey := NameNamespace{source.Name, source.Namespace}
-			srcK8sPods := podsBySa[srcSaKey]
+			pods := podsBySa[srcSaKey]
 
-			srcPods := make([]*Pod, len(srcK8sPods))
-			for _, pod := range srcK8sPods {
-				srcPods = append(srcPods, getOrCreatePod(&topology, pod))
+			srcPods := make([]*Pod, len(pods))
+			for i, pod := range pods {
+				srcPods[i] = getOrCreatePod(&topology, pod)
 			}
 
 			sources[srcSaKey] = ServiceTrafficTargetSource{
@@ -119,8 +144,8 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 
 			// Find out who are the destination pods.
 			destPods := make([]*Pod, len(pods))
-			for _, pod := range pods {
-				destPods = append(destPods, getOrCreatePod(&topology, pod))
+			for i, pod := range pods {
+				destPods[i] = getOrCreatePod(&topology, pod)
 			}
 
 			// Find out which port can be used on the destination service.
@@ -168,6 +193,22 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 	}
 
 	return &topology, nil
+}
+
+func (b *TopologyBuilder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {
+	podsBySvc := make(map[*v1.Service][]*v1.Pod)
+	for _, pod := range pods {
+		services, err := b.svcLister.GetPodServices(pod)
+		if err != nil {
+			return nil, fmt.Errorf("unable to get pod %q services: %w", pod.Name, err)
+		}
+
+		for _, service := range services {
+			podsBySvc[service] = append(podsBySvc[service], pod)
+		}
+	}
+
+	return podsBySvc, nil
 }
 
 func getOrCreatePod(topology *Topology, pod *v1.Pod) *Pod {
