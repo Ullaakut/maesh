@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
+
 	"github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	accessclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned"
 	accessinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
@@ -84,13 +86,36 @@ func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessC
 	}, nil
 }
 
-func (b *TopologyBuilder) Build() (*Topology, error) {
+func (b *TopologyBuilder) Build(acl bool) (*Topology, error) {
 	topology := NewTopology()
 
+	if acl {
+		trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
+		if err != nil {
+			return nil, fmt.Errorf("unable to list TrafficTargets: %w", err)
+		}
+
+		if err := b.buildServicesFromTrafficTargets(topology, trafficTargets); err != nil {
+			return nil, err
+		}
+	}
+
+	trafficSplits, err := b.trafficSplitLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list TrafficSplits: %w", err)
+	}
+	if err := b.buildServicesFromTrafficSplits(topology, trafficSplits); err != nil {
+		return nil, err
+	}
+
+	return topology, nil
+}
+
+func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, trafficTargets []*v1alpha1.TrafficTarget) error {
 	// Group pods by service account.
 	pods, err := b.podLister.List(labels.Everything())
 	if err != nil {
-		return nil, fmt.Errorf("unable to list Pods: %w", err)
+		return fmt.Errorf("unable to list Pods: %w", err)
 	}
 	podsBySa := b.groupPodsByServiceAccount(pods)
 
@@ -101,17 +126,13 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 	// - Create a new "ServiceTrafficTarget" for each new "Service" and link them together.
 	// - And Finally, we link "Pod"s with the "ServiceTrafficTarget". In the Pod.Outgoing for source pods and in
 	// Pod.Incoming for destination pods.
-	trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list TrafficTargets: %w", err)
-	}
 	for _, trafficTarget := range trafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
 
 		// Group destination pods by service.
 		podsBySvc, err := b.groupPodsByService(podsBySa[destSaKey])
 		if err != nil {
-			return nil, fmt.Errorf("unable to group pods by service: %w", err)
+			return fmt.Errorf("unable to group pods by service: %w", err)
 		}
 
 		// Build traffic target sources.
@@ -129,7 +150,7 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 			// Find out which port can be used on the destination service.
 			destPorts, err := b.getTrafficTargetDestinationPorts(service, trafficTarget)
 			if err != nil {
-				return nil, fmt.Errorf("unable to find TrafficTarget %q destination ports for service %s: %w", trafficTarget.Name, service.Name, err)
+				return fmt.Errorf("unable to find TrafficTarget %q destination ports for service %s: %w", trafficTarget.Name, service.Name, err)
 			}
 
 			dest := ServiceTrafficTargetDestination{
@@ -162,15 +183,14 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 		}
 	}
 
-	// Attach TrafficSplits to services
-	trafficSplits, err := b.trafficSplitLister.List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list TrafficSplits: %w", err)
-	}
+	return nil
+}
+
+func (b *TopologyBuilder) buildServicesFromTrafficSplits(topology *Topology, trafficSplits []*v1alpha2.TrafficSplit) error {
 	for _, trafficSplit := range trafficSplits {
 		k8sSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(trafficSplit.Spec.Service)
 		if err != nil {
-			return nil, fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, trafficSplit.Spec.Service, err)
+			return fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, trafficSplit.Spec.Service, err)
 		}
 
 		svc := getOrCreateService(topology, k8sSvc)
@@ -179,7 +199,7 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 		for i, backend := range trafficSplit.Spec.Backends {
 			k8sBackendSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(backend.Service)
 			if err != nil {
-				return nil, fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, backend.Service, err)
+				return fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, backend.Service, err)
 			}
 
 			backends[i] = TrafficSplitBackend{
@@ -198,7 +218,7 @@ func (b *TopologyBuilder) Build() (*Topology, error) {
 		})
 	}
 
-	return topology, nil
+	return nil
 }
 
 func (b *TopologyBuilder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {
