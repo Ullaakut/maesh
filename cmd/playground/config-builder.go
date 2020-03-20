@@ -177,7 +177,7 @@ func (c *ConfigBuilder) BuildConfig(topology *topology.Topology) *dynamic.Config
 						host := fmt.Sprintf("%s.%s.maesh", backend.Service.Name, backend.Service.Namespace)
 						address := net.JoinHostPort(host, strconv.FormatInt(int64(port.Port), 10))
 
-						config.HTTP.Services[sliptKey] = buildHTTPLoadBalancer([]string{address})
+						config.TCP.Services[sliptKey] = buildTCPLoadBalancer([]string{address})
 						WRRServices = append(WRRServices, dynamic.TCPWRRService{
 							Name:   sliptKey,
 							Weight: intToP(int64(backend.Weight)),

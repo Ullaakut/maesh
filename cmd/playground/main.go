@@ -2,24 +2,26 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
+	"os"
 
 	topology2 "github.com/containous/maesh/pkg/topology"
 
 	mk8s "github.com/containous/maesh/pkg/k8s"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	accessClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned"
 	specsClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned"
 	splitClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
+	"github.com/sirupsen/logrus"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 func main() {
 	ctx := context.Background()
-	kubeConfig := "/home/jspdown/.config/k3d/k3s-default/kubeconfig.yaml"
+	kubeConfig := "/home/landry/.config/k3d/k3s-default/kubeconfig.yaml"
 	url := ""
 
 	config, err := clientcmd.BuildConfigFromFlags(url, kubeConfig)
@@ -72,4 +74,14 @@ func main() {
 	}
 
 	fmt.Println(topology.Dump())
+
+	logger := logrus.New()
+
+	configBuilder := New(logger, "http", "whoami", nil, 5000, 5010)
+
+	dynConfig := configBuilder.BuildConfig(topology)
+
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetEscapeHTML(false)
+	enc.Encode(dynConfig)
 }
