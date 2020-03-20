@@ -15,55 +15,6 @@ import (
 	"github.com/sirupsen/logrus"
 )
 
-/*
-Services:
-  [whoami/whoami-server]:
-    Name: whoami-server
-    Namespace: whoami
-    ClusterIP: 10.43.231.88
-    Annotations:
-      - kubectl.kubernetes.io/last-applied-configuration: {"apiVersion":"v1","kind"...
-    Selector:
-      - app: whoami-server
-    Ports:
-      - 8080->80
-    TrafficTarget:
-      [traffic-target-test] 0xc00011ec60
-        Name: traffic-target-test
-        Service: 0xc00011db20
-        Sources:
-          [whoami/whoami-client]
-            ServiceAccount: whoami-client
-            Namespace: whoami
-            Pods:
-              - whoami/whoami-client
-        Destination:
-          ServiceAccount: whoami-server
-          Namespace: whoami
-          Pods: whoami
-            - whoami/whoami-server-74788cbb6d-qssxt
-            - whoami/whoami-server-74788cbb6d-8gkgn
-Pods:
-  [whoami/whoami-client]
-    Namespace: whoami
-    Name: whoami-client
-    IP: 10.42.0.7
-    Outgoing:
-      - 0xc00011ec60 (name=whoami-server, service=traffic-target-test)
-  [whoami/whoami-server-74788cbb6d-qssxt]
-    Namespace: whoami
-    Name: whoami-server-74788cbb6d-qssxt
-    IP: 10.42.0.5
-    Incoming:
-      - 0xc00011ec60 (name=whoami-server, service=traffic-target-test)
-  [whoami/whoami-server-74788cbb6d-8gkgn]
-    Namespace: whoami
-    Name: whoami-server-74788cbb6d-8gkgn
-    IP: 10.42.0.6
-    Incoming:
-      - 0xc00011ec60 (name=whoami-server, service=traffic-target-test)
-*/
-
 // TCPPortFinder is capable of retrieving a TCP port mapping for a given service.
 type TCPPortFinder interface {
 	Find(svc k8s.ServiceWithPort) (int32, bool)
@@ -77,17 +28,18 @@ func (t TCPPortFinderMock) Find(_ k8s.ServiceWithPort) (int32, bool) {
 
 type ConfigBuilder struct {
 	logger        logrus.FieldLogger
+	namespace     string
 	tcpStateTable TCPPortFinder
 	defaultMode   string
 	minHTTPPort   int32
 	maxHTTPPort   int32
 }
 
-func New(logger logrus.FieldLogger, defaultMode string, tcpStateTable TCPPortFinder, minPortHTTP, maxPortHTTP int32) *ConfigBuilder {
+func New(logger logrus.FieldLogger, defaultMode string, namespace string, tcpStateTable TCPPortFinder, minPortHTTP, maxPortHTTP int32) *ConfigBuilder {
 	if tcpStateTable == nil {
 		tcpStateTable = TCPPortFinderMock{}
 	}
-	return &ConfigBuilder{logger: logger, defaultMode: defaultMode, tcpStateTable: tcpStateTable, minHTTPPort: minPortHTTP, maxHTTPPort: maxPortHTTP}
+	return &ConfigBuilder{logger: logger, defaultMode: defaultMode, namespace: namespace, tcpStateTable: tcpStateTable, minHTTPPort: minPortHTTP, maxHTTPPort: maxPortHTTP}
 }
 
 // Add the match of the HTTPRouteGroup
@@ -97,10 +49,13 @@ func (c *ConfigBuilder) BuildConfig(topology *Topology) *dynamic.Configuration {
 	for _, service := range topology.Services {
 		serviceMode := c.getServiceMode(service.Annotations[k8s.AnnotationServiceType])
 
+		scheme := base.GetScheme(service.Annotations)
 		var middlewaresKey string
 		if serviceMode != k8s.ServiceTypeTCP {
 			middlewaresKey = fmt.Sprintf("%s-%s", service.Name, service.Namespace)
-			config.HTTP.Middlewares[middlewaresKey] = c.buildHTTPMiddlewares(service.Annotations)
+			if middlewares := c.buildHTTPMiddlewares(service.Annotations); middlewares != nil {
+				config.HTTP.Middlewares[middlewaresKey] = middlewares
+			}
 		}
 		for _, tt := range service.TrafficTargets {
 			for idPort, port := range tt.Destination.Ports {
@@ -119,7 +74,11 @@ func (c *ConfigBuilder) BuildConfig(topology *Topology) *dynamic.Configuration {
 						continue
 					}
 
-					config.HTTP.Services[key] = buildHTTPService(tt.Destination.Pods, port)
+					var urls []string
+					for _, pod := range tt.Destination.Pods {
+						urls = append(urls, fmt.Sprintf("%s://%s", scheme, net.JoinHostPort(pod.IP, strconv.Itoa(int(port)))))
+					}
+					config.HTTP.Services[key] = buildHTTPLoadBalancer(urls)
 
 					whitelistKey := tt.Name + "-" + service.Namespace + "-" + key + "-whitelist"
 					config.HTTP.Middlewares[whitelistKey] = createWhitelistMiddleware(sourceIPs)
@@ -129,7 +88,8 @@ func (c *ConfigBuilder) BuildConfig(topology *Topology) *dynamic.Configuration {
 						middlewares = append(middlewares, middlewaresKey)
 					}
 
-					config.HTTP.Routers[key] = buildHTTPRouter(key, service, entrypointPort, middlewares, tt.Specs)
+					rule := buildRuleSnippetFromServiceAndMatch(service.Name, service.Namespace, service.ClusterIP, tt.Specs)
+					config.HTTP.Routers[key] = buildHTTPRouter(key, entrypointPort, middlewares, rule)
 				case k8s.ServiceTypeTCP:
 					if len(tt.Destination.Pods) == 0 {
 						continue
@@ -153,7 +113,81 @@ func (c *ConfigBuilder) BuildConfig(topology *Topology) *dynamic.Configuration {
 						continue
 					}
 
-					config.TCP.Services[key] = buildTCPService(tt.Destination.Pods, port)
+					var addresses []string
+					for _, pod := range tt.Destination.Pods {
+						addresses = append(addresses, net.JoinHostPort(pod.IP, strconv.FormatInt(int64(port), 10)))
+					}
+					config.TCP.Services[key] = buildTCPLoadBalancer(addresses)
+					config.TCP.Routers[key] = buildTCPRouter(key, entrypointPort)
+				}
+			}
+		}
+
+		for _, split := range service.TrafficSplits {
+			for idPort, port := range service.Ports {
+				switch serviceMode {
+				case k8s.ServiceTypeHTTP:
+					entrypointPort, err := c.getHTTPPort(idPort)
+					if err != nil {
+						c.logger.Debugf("Mesh HTTP port not found for service %s/%s %d", service.Namespace, service.Name, port.Port)
+						continue
+					}
+
+					key := buildKey(service.Name, service.Namespace, 0, split.Name, service.Namespace) + "-split"
+
+					var WRRServices []dynamic.WRRService
+					for _, backend := range split.Backends {
+						//create a service/backend with the url of the service
+						sliptKey := fmt.Sprintf("%s-split-%s", key, backend.Service.Name)
+
+						host := fmt.Sprintf("%s.%s.maesh", backend.Service.Name, backend.Service.Namespace)
+						address := net.JoinHostPort(host, strconv.FormatInt(int64(port.Port), 10))
+						url := fmt.Sprintf("%s://%s", scheme, address)
+
+						config.HTTP.Services[sliptKey] = buildHTTPLoadBalancer([]string{url})
+						WRRServices = append(WRRServices, dynamic.WRRService{
+							Name:   sliptKey,
+							Weight: intToP(int64(backend.Weight)),
+						})
+					}
+
+					config.HTTP.Services[key] = &dynamic.Service{
+						Weighted: &dynamic.WeightedRoundRobin{
+							Services: WRRServices,
+						},
+					}
+
+					rule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", service.Name, service.Namespace, service.ClusterIP)
+					config.HTTP.Routers[key] = buildHTTPRouter(key, entrypointPort, []string{middlewaresKey}, rule)
+				case k8s.ServiceTypeTCP:
+					entrypointPort, err := c.getTCPPort(service.Name, service.Namespace, port.Port)
+					if err != nil {
+						c.logger.Debugf("Mesh TCP port not found for service %s/%s %d", service.Namespace, service.Name, port)
+						continue
+					}
+					key := buildKey(service.Name, service.Namespace, 0, split.Name, service.Namespace) + "-split"
+
+					var WRRServices []dynamic.TCPWRRService
+					for _, backend := range split.Backends {
+						//create a service/backend with the url of the service
+						sliptKey := fmt.Sprintf("%s-split-%s", key, backend.Service.Name)
+
+						host := fmt.Sprintf("%s.%s.maesh", backend.Service.Name, backend.Service.Namespace)
+						address := net.JoinHostPort(host, strconv.FormatInt(int64(port.Port), 10))
+
+						config.HTTP.Services[sliptKey] = buildHTTPLoadBalancer([]string{address})
+						WRRServices = append(WRRServices, dynamic.TCPWRRService{
+							Name:   sliptKey,
+							Weight: intToP(int64(backend.Weight)),
+						})
+					}
+
+					config.TCP.Services[key] = &dynamic.TCPService{
+						Weighted: &dynamic.TCPWeightedRoundRobin{
+							Services: WRRServices,
+						},
+					}
+
 					config.TCP.Routers[key] = buildTCPRouter(key, entrypointPort)
 				}
 			}
@@ -202,20 +236,20 @@ func buildRuleSnippetFromServiceAndMatch(name, namespace, ip string, specs []Tra
 	return hostRule
 }
 
-func buildHTTPRouter(key string, service *Service, entrypointPort int32, middlewares []string, specs []TrafficSpec) *dynamic.Router {
+func buildHTTPRouter(key string, entrypointPort int32, middlewares []string, rule string) *dynamic.Router {
 	return &dynamic.Router{
-		Rule:        buildRuleSnippetFromServiceAndMatch(service.Name, service.Namespace, service.ClusterIP, specs),
+		Rule:        rule,
 		EntryPoints: []string{fmt.Sprintf("http-%d", entrypointPort)},
 		Service:     key,
 		Middlewares: middlewares,
 	}
 }
 
-func buildHTTPService(destinationPods []*Pod, port int32) *dynamic.Service {
+func buildHTTPLoadBalancer(urls []string) *dynamic.Service {
 	var servers []dynamic.Server
-	for _, pod := range destinationPods {
+	for _, url := range urls {
 		server := dynamic.Server{
-			URL: fmt.Sprintf("%s://%s", "http", net.JoinHostPort(pod.IP, strconv.Itoa(int(port)))),
+			URL: url,
 		}
 		servers = append(servers, server)
 	}
@@ -228,19 +262,11 @@ func buildHTTPService(destinationPods []*Pod, port int32) *dynamic.Service {
 	}
 }
 
-func buildTCPRouter(key string, entrypointPort int32) *dynamic.TCPRouter {
-	return &dynamic.TCPRouter{
-		Rule:        "HostSNI(`*`)",
-		EntryPoints: []string{fmt.Sprintf("tcp-%d", entrypointPort)},
-		Service:     key,
-	}
-}
-
-func buildTCPService(destinationPods []*Pod, port int32) *dynamic.TCPService {
+func buildTCPLoadBalancer(addresses []string) *dynamic.TCPService {
 	var servers []dynamic.TCPServer
-	for _, pod := range destinationPods {
+	for _, address := range addresses {
 		server := dynamic.TCPServer{
-			Address: net.JoinHostPort(pod.IP, strconv.FormatInt(int64(port), 10)),
+			Address: address,
 		}
 		servers = append(servers, server)
 	}
@@ -249,6 +275,14 @@ func buildTCPService(destinationPods []*Pod, port int32) *dynamic.TCPService {
 		LoadBalancer: &dynamic.TCPServersLoadBalancer{
 			Servers: servers,
 		},
+	}
+}
+
+func buildTCPRouter(key string, entrypointPort int32) *dynamic.TCPRouter {
+	return &dynamic.TCPRouter{
+		Rule:        "HostSNI(`*`)",
+		EntryPoints: []string{fmt.Sprintf("tcp-%d", entrypointPort)},
+		Service:     key,
 	}
 }
 
@@ -380,4 +414,9 @@ func buildKey(serviceName, namespace string, port int32, ttName, ttNamespace str
 	fullHash := string(dst)
 
 	return fmt.Sprintf("%.10s-%.10s-%d-%.10s-%.10s-%.16s", serviceName, namespace, port, ttName, ttNamespace, fullHash)
+}
+
+func intToP(v int64) *int {
+	i := int(v)
+	return &i
 }
