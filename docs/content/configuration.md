@@ -161,11 +161,11 @@ More information can be found [in the SMI specification](https://github.com/deis
 SMI defines the `TrafficSplit` resource which allows to direct subsets of the traffic to different services.
 
 ```yaml
-apiVersion: split.smi-spec.io/v1alpha1
+apiVersion: split.smi-spec.io/v1alpha2
 kind: TrafficSplit
 metadata:
   name: server-split
-  namespace server
+  namespace: server
 spec:
   service: server
   backends:
