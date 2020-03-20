@@ -17,9 +17,8 @@ type NameNamespace struct {
 }
 
 type Topology struct {
-	Services     map[NameNamespace]*Service
-	Pods         map[NameNamespace]*Pod
-	TrafficSpecs map[NameNamespace]*TrafficSpec
+	Services map[NameNamespace]*Service
+	Pods     map[NameNamespace]*Pod
 
 	TrafficTargets  map[NameNamespace]*access.TrafficTarget
 	TrafficSplits   map[NameNamespace]*split.TrafficSplit
@@ -31,7 +30,6 @@ func NewTopology() *Topology {
 	return &Topology{
 		Services:        make(map[NameNamespace]*Service),
 		Pods:            make(map[NameNamespace]*Pod),
-		TrafficSpecs:    make(map[NameNamespace]*TrafficSpec),
 		TrafficTargets:  make(map[NameNamespace]*access.TrafficTarget),
 		TrafficSplits:   make(map[NameNamespace]*split.TrafficSplit),
 		HTTPRouteGroups: make(map[NameNamespace]*specs.HTTPRouteGroup),

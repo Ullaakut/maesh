@@ -325,9 +325,10 @@ func (b *TopologyBuilder) buildTrafficTargetSpecs(topology *Topology, tt *access
 
 			var httpMatches []*spec.HTTPMatch
 			if len(s.Matches) == 0 {
-				httpMatches := make([]*spec.HTTPMatch, len(httpRouteGroup.Matches))
+				httpMatches = make([]*spec.HTTPMatch, len(httpRouteGroup.Matches))
 				for i, match := range httpRouteGroup.Matches {
-					httpMatches[i] = &match
+					m := match
+					httpMatches[i] = &m
 				}
 			} else {
 				for _, name := range s.Matches {
