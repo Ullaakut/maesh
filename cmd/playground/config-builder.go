@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/containous/maesh/pkg/topology"
+
 	"github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/providers/base"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
@@ -43,7 +45,7 @@ func New(logger logrus.FieldLogger, defaultMode string, namespace string, tcpSta
 }
 
 // Add the match of the HTTPRouteGroup
-func (c *ConfigBuilder) BuildConfig(topology *Topology) *dynamic.Configuration {
+func (c *ConfigBuilder) BuildConfig(topology *topology.Topology) *dynamic.Configuration {
 	config := base.CreateBaseConfigWithReadiness()
 
 	for _, service := range topology.Services {
@@ -197,7 +199,7 @@ func (c *ConfigBuilder) BuildConfig(topology *Topology) *dynamic.Configuration {
 	return config
 }
 
-func buildRuleSnippetFromServiceAndMatch(name, namespace, ip string, specs []TrafficSpec) string {
+func buildRuleSnippetFromServiceAndMatch(name, namespace, ip string, specs []topology.TrafficSpec) string {
 	var result []string
 
 	for _, spec := range specs {
@@ -315,7 +317,7 @@ func (c *ConfigBuilder) getServiceMode(mode string) string {
 	return mode
 }
 
-func getIpSource(sources map[NameNamespace]ServiceTrafficTargetSource) []string {
+func getIpSource(sources []topology.ServiceTrafficTargetSource) []string {
 	var sourceIPs []string
 	for _, source := range sources {
 		for _, podSource := range source.Pods {

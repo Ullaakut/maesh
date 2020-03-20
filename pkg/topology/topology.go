@@ -1,14 +1,12 @@
-package main
+package topology
 
 import (
 	"fmt"
 	"strings"
 
-	v1alpha12 "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
-	"github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
-
-	"github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
-
+	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
+	specs "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
+	split "github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -23,10 +21,10 @@ type Topology struct {
 	Pods         map[NameNamespace]*Pod
 	TrafficSpecs map[NameNamespace]*TrafficSpec
 
-	TrafficTargets  map[NameNamespace]*v1alpha12.TrafficTarget
-	TrafficSplits   map[NameNamespace]*v1alpha2.TrafficSplit
-	HTTPRouteGroups map[NameNamespace]*v1alpha1.HTTPRouteGroup
-	TCPRoutes       map[NameNamespace]*v1alpha1.TCPRoute
+	TrafficTargets  map[NameNamespace]*access.TrafficTarget
+	TrafficSplits   map[NameNamespace]*split.TrafficSplit
+	HTTPRouteGroups map[NameNamespace]*specs.HTTPRouteGroup
+	TCPRoutes       map[NameNamespace]*specs.TCPRoute
 }
 
 func NewTopology() *Topology {
@@ -34,10 +32,10 @@ func NewTopology() *Topology {
 		Services:        make(map[NameNamespace]*Service),
 		Pods:            make(map[NameNamespace]*Pod),
 		TrafficSpecs:    make(map[NameNamespace]*TrafficSpec),
-		TrafficTargets:  make(map[NameNamespace]*v1alpha12.TrafficTarget),
-		TrafficSplits:   make(map[NameNamespace]*v1alpha2.TrafficSplit),
-		HTTPRouteGroups: make(map[NameNamespace]*v1alpha1.HTTPRouteGroup),
-		TCPRoutes:       make(map[NameNamespace]*v1alpha1.TCPRoute),
+		TrafficTargets:  make(map[NameNamespace]*access.TrafficTarget),
+		TrafficSplits:   make(map[NameNamespace]*split.TrafficSplit),
+		HTTPRouteGroups: make(map[NameNamespace]*specs.HTTPRouteGroup),
+		TCPRoutes:       make(map[NameNamespace]*specs.TCPRoute),
 	}
 }
 
@@ -49,7 +47,7 @@ type Service struct {
 	Ports       []corev1.ServicePort
 	ClusterIP   string
 
-	TrafficTargets map[string]*ServiceTrafficTarget
+	TrafficTargets []*ServiceTrafficTarget
 	TrafficSplits  []*TrafficSplit
 }
 
@@ -57,7 +55,7 @@ type ServiceTrafficTarget struct {
 	Service *Service
 	Name    string
 
-	Sources     map[NameNamespace]ServiceTrafficTargetSource
+	Sources     []ServiceTrafficTargetSource
 	Destination ServiceTrafficTargetDestination
 	Specs       []TrafficSpec
 }
@@ -76,10 +74,10 @@ type ServiceTrafficTargetDestination struct {
 }
 
 type TrafficSpec struct {
-	HTTPRouteGroup *v1alpha1.HTTPRouteGroup
-	TCPRoute       *v1alpha1.TCPRoute
+	HTTPRouteGroup *specs.HTTPRouteGroup
+	TCPRoute       *specs.TCPRoute
 
-	HTTPMatches []*v1alpha1.HTTPMatch
+	HTTPMatches []*specs.HTTPMatch
 }
 
 type Pod struct {
@@ -146,15 +144,15 @@ func (t *Topology) Dump() string {
 
 		if len(service.TrafficTargets) > 0 {
 			s += leftPadf(2, "TrafficTargets:")
-			for sa, tt := range service.TrafficTargets {
-				s += leftPadf(3, "[%s] %p", sa, tt)
+			for _, tt := range service.TrafficTargets {
+				s += leftPadf(3, "- [%s]", tt.Name)
 				s += leftPadf(4, "Name: %s", tt.Name)
 				s += leftPadf(4, "Service: %s/%s", tt.Service.Namespace, tt.Service.Name)
 
 				if len(tt.Sources) > 0 {
 					s += leftPadf(4, "Sources:")
-					for ssa, source := range tt.Sources {
-						s += leftPadf(5, "[%s/%s]", ssa.Namespace, ssa.Name)
+					for _, source := range tt.Sources {
+						s += leftPadf(5, "[%s/%s]", source.Namespace, source.ServiceAccount)
 						s += leftPadf(6, "ServiceAccount: %s", source.ServiceAccount)
 						s += leftPadf(6, "Namespace: %s", source.Namespace)
 						if len(source.Pods) > 0 {
@@ -212,27 +210,28 @@ func (t *Topology) Dump() string {
 		}
 	}
 
-	s += leftPadf(0, "Pods:")
-	for k, pod := range t.Pods {
-		s += leftPadf(1, "[%s/%s]", k.Namespace, k.Name)
-		s += leftPadf(2, "Namespace: %s", pod.Namespace)
-		s += leftPadf(2, "Name: %s", pod.Name)
-		s += leftPadf(2, "IP: %s", pod.IP)
+	if len(t.Pods) > 0 {
+		s += leftPadf(0, "Pods:")
+		for k, pod := range t.Pods {
+			s += leftPadf(1, "[%s/%s]", k.Namespace, k.Name)
+			s += leftPadf(2, "Namespace: %s", pod.Namespace)
+			s += leftPadf(2, "Name: %s", pod.Name)
+			s += leftPadf(2, "IP: %s", pod.IP)
 
-		if len(pod.Outgoing) > 0 {
-			s += leftPadf(2, "Outgoing:")
-			for _, out := range pod.Outgoing {
-				s += leftPadf(3, "- service=%s traffic-target=%s", out.Service.Name, out.Name)
+			if len(pod.Outgoing) > 0 {
+				s += leftPadf(2, "Outgoing:")
+				for _, out := range pod.Outgoing {
+					s += leftPadf(3, "- service=%s traffic-target=%s", out.Service.Name, out.Name)
+				}
+			}
+
+			if len(pod.Incoming) > 0 {
+				s += leftPadf(2, "Incoming:")
+				for _, in := range pod.Incoming {
+					s += leftPadf(3, "- service=%s traffic-target=%s", in.Service.Name, in.Name)
+				}
 			}
 		}
-
-		if len(pod.Incoming) > 0 {
-			s += leftPadf(2, "Incoming:")
-			for _, in := range pod.Incoming {
-				s += leftPadf(3, "- service=%s traffic-target=%s", in.Service.Name, in.Name)
-			}
-		}
-
 	}
 
 	return s

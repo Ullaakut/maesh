@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log"
 
+	topology2 "github.com/containous/maesh/pkg/topology"
+
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -45,7 +47,7 @@ func main() {
 		log.Fatalf("unable to create SMI spec client: %v", err)
 	}
 
-	builder, err := NewTopologyBuilder(ctx, client, smiAccessClient, smiSpecClient, smiSplitClient)
+	builder, err := topology2.NewTopologyBuilder(ctx, client, smiAccessClient, smiSpecClient, smiSplitClient)
 	if err != nil {
 		fmt.Printf("unable to create topology builder: %v\n", err)
 		return

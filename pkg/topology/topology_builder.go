@@ -1,4 +1,4 @@
-package main
+package topology
 
 import (
 	"context"
@@ -180,24 +180,25 @@ func (b *TopologyBuilder) evaluateTrafficTargets(topology *Topology) error {
 			}
 
 			// Create the ServiceTrafficTarget for the given service.
-			svc.TrafficTargets[trafficTarget.Name] = &ServiceTrafficTarget{
+			svcTrafficTarget := &ServiceTrafficTarget{
 				Service:     svc,
 				Name:        trafficTarget.Name,
 				Sources:     sources,
 				Destination: dest,
 				Specs:       specs,
 			}
+			svc.TrafficTargets = append(svc.TrafficTargets, svcTrafficTarget)
 
 			// Add the ServiceTrafficTarget to the source pods.
 			for _, source := range sources {
 				for _, pod := range source.Pods {
-					pod.Outgoing = append(pod.Outgoing, svc.TrafficTargets[trafficTarget.Name])
+					pod.Outgoing = append(pod.Outgoing, svcTrafficTarget)
 				}
 			}
 
 			// Add the ServiceTrafficTarget to the destination pods
 			for _, pod := range dest.Pods {
-				pod.Incoming = append(pod.Incoming, svc.TrafficTargets[trafficTarget.Name])
+				pod.Incoming = append(pod.Incoming, svcTrafficTarget)
 			}
 		}
 	}
@@ -268,10 +269,10 @@ func (b *TopologyBuilder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameName
 	return podsBySa
 }
 
-func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) map[NameNamespace]ServiceTrafficTargetSource {
-	sources := make(map[NameNamespace]ServiceTrafficTargetSource)
+func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) []ServiceTrafficTargetSource {
+	sources := make([]ServiceTrafficTargetSource, len(tt.Sources))
 
-	for _, source := range tt.Sources {
+	for i, source := range tt.Sources {
 		srcSaKey := NameNamespace{source.Name, source.Namespace}
 		pods := podsBySa[srcSaKey]
 
@@ -280,7 +281,7 @@ func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *access.Traf
 			srcPods[i] = getOrCreatePod(t, pod)
 		}
 
-		sources[srcSaKey] = ServiceTrafficTargetSource{
+		sources[i] = ServiceTrafficTargetSource{
 			ServiceAccount: source.Name,
 			Namespace:      source.Namespace,
 			Pods:           srcPods,
@@ -381,13 +382,12 @@ func (b *TopologyBuilder) gatherServices(topology *Topology, ignored mk8s.Ignore
 
 		svcKey := NameNamespace{svc.Name, svc.Namespace}
 		topology.Services[svcKey] = &Service{
-			Name:           svc.Name,
-			Namespace:      svc.Namespace,
-			Selector:       svc.Spec.Selector,
-			Annotations:    svc.Annotations,
-			Ports:          svc.Spec.Ports,
-			ClusterIP:      svc.Spec.ClusterIP,
-			TrafficTargets: make(map[string]*ServiceTrafficTarget),
+			Name:        svc.Name,
+			Namespace:   svc.Namespace,
+			Selector:    svc.Spec.Selector,
+			Annotations: svc.Annotations,
+			Ports:       svc.Spec.Ports,
+			ClusterIP:   svc.Spec.ClusterIP,
 		}
 	}
 
