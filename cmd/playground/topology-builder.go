@@ -7,18 +7,18 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
-
-	"github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
+	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
+	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
+	split "github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
 	accessclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned"
 	accessinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
-	access "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/listers/access/v1alpha1"
+	accessLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/listers/access/v1alpha1"
 	specsclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned"
 	specsinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/informers/externalversions"
-	spec "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/listers/specs/v1alpha1"
+	specLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/listers/specs/v1alpha1"
 	splitclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
 	splitinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/informers/externalversions"
-	split "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/listers/split/v1alpha2"
+	splitLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/listers/split/v1alpha2"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/informers"
@@ -30,9 +30,10 @@ type TopologyBuilder struct {
 	svcLister            listers.ServiceLister
 	epLister             listers.EndpointsLister
 	podLister            listers.PodLister
-	trafficTargetLister  access.TrafficTargetLister
-	trafficSplitLister   split.TrafficSplitLister
-	httpRouteGroupLister spec.HTTPRouteGroupLister
+	trafficTargetLister  accessLister.TrafficTargetLister
+	trafficSplitLister   splitLister.TrafficSplitLister
+	httpRouteGroupLister specLister.HTTPRouteGroupLister
+	tcpRoutesLister      specLister.TCPRouteLister
 }
 
 func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessClient accessclient.Interface, smiSpecClient specsclient.Interface, smiSplitClient splitclient.Interface) (*TopologyBuilder, error) {
@@ -46,6 +47,7 @@ func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessC
 	podLister := k8sInformerFact.Core().V1().Pods().Lister()
 	trafficTargetLister := smiAccessInformerFact.Access().V1alpha1().TrafficTargets().Lister()
 	httpRouteGroupLister := smiSpecInformerFact.Specs().V1alpha1().HTTPRouteGroups().Lister()
+	tcpRouteLister := smiSpecInformerFact.Specs().V1alpha1().TCPRoutes().Lister()
 	trafficSplitLister := smiSplitInformerFact.Split().V1alpha2().TrafficSplits().Lister()
 
 	k8sInformerFact.Start(ctx.Done())
@@ -83,11 +85,30 @@ func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessC
 		trafficTargetLister:  trafficTargetLister,
 		trafficSplitLister:   trafficSplitLister,
 		httpRouteGroupLister: httpRouteGroupLister,
+		tcpRoutesLister:      tcpRouteLister,
 	}, nil
 }
 
 func (b *TopologyBuilder) Build(acl bool) (*Topology, error) {
 	topology := NewTopology()
+
+	httpRouteGroups, err := b.httpRouteGroupLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list HTTPRouteGroups: %w", err)
+	}
+	for _, httpRouteGroup := range httpRouteGroups {
+		key := NameNamespace{httpRouteGroup.Name, httpRouteGroup.Namespace}
+		topology.HTTPRouteGroups[key] = httpRouteGroup
+	}
+
+	tcpRoutes, err := b.tcpRoutesLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list TCPRouteGroups")
+	}
+	for _, tcpRoute := range tcpRoutes {
+		key := NameNamespace{tcpRoute.Name, tcpRoute.Namespace}
+		topology.TCPRoutes[key] = tcpRoute
+	}
 
 	if acl {
 		trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
@@ -111,7 +132,7 @@ func (b *TopologyBuilder) Build(acl bool) (*Topology, error) {
 	return topology, nil
 }
 
-func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, trafficTargets []*v1alpha1.TrafficTarget) error {
+func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, trafficTargets []*access.TrafficTarget) error {
 	// Group pods by service account.
 	pods, err := b.podLister.List(labels.Everything())
 	if err != nil {
@@ -138,6 +159,12 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 		// Build traffic target sources.
 		sources := b.buildTrafficTargetSources(topology, trafficTarget, podsBySa)
 
+		// Build traffic target specs.
+		specs, err := b.buildTrafficTargetSpecs(topology, trafficTarget)
+		if err != nil {
+			return fmt.Errorf("unable to build Specs for TrafficTarget %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, err)
+		}
+
 		for service, pods := range podsBySvc {
 			svc := getOrCreateService(topology, service)
 
@@ -150,7 +177,7 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 			// Find out which port can be used on the destination service.
 			destPorts, err := b.getTrafficTargetDestinationPorts(service, trafficTarget)
 			if err != nil {
-				return fmt.Errorf("unable to find TrafficTarget %q destination ports for service %s: %w", trafficTarget.Name, service.Name, err)
+				return fmt.Errorf("unable to find TrafficTarget %s/%s destination ports for service %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, service.Namespace, service.Name, err)
 			}
 
 			dest := ServiceTrafficTargetDestination{
@@ -166,7 +193,7 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 				Name:        trafficTarget.Name,
 				Sources:     sources,
 				Destination: dest,
-				Specs:       nil,
+				Specs:       specs,
 			}
 
 			// Add the ServiceTrafficTarget to the source pods.
@@ -186,11 +213,11 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 	return nil
 }
 
-func (b *TopologyBuilder) buildServicesFromTrafficSplits(topology *Topology, trafficSplits []*v1alpha2.TrafficSplit) error {
+func (b *TopologyBuilder) buildServicesFromTrafficSplits(topology *Topology, trafficSplits []*split.TrafficSplit) error {
 	for _, trafficSplit := range trafficSplits {
 		k8sSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(trafficSplit.Spec.Service)
 		if err != nil {
-			return fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, trafficSplit.Spec.Service, err)
+			return fmt.Errorf("unable to find Service %s/%s: %w", trafficSplit.Namespace, trafficSplit.Spec.Service, err)
 		}
 
 		svc := getOrCreateService(topology, k8sSvc)
@@ -199,7 +226,7 @@ func (b *TopologyBuilder) buildServicesFromTrafficSplits(topology *Topology, tra
 		for i, backend := range trafficSplit.Spec.Backends {
 			k8sBackendSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(backend.Service)
 			if err != nil {
-				return fmt.Errorf("unable to find Service %q in namespace %q: %w", trafficSplit.Namespace, backend.Service, err)
+				return fmt.Errorf("unable to find Service %s/%s: %w", trafficSplit.Namespace, backend.Service, err)
 			}
 
 			backends[i] = TrafficSplitBackend{
@@ -214,7 +241,6 @@ func (b *TopologyBuilder) buildServicesFromTrafficSplits(topology *Topology, tra
 			Namespace: trafficSplit.Namespace,
 			Service:   svc,
 			Backends:  backends,
-			Specs:     nil,
 		})
 	}
 
@@ -227,7 +253,7 @@ func (b *TopologyBuilder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]
 	for _, pod := range pods {
 		services, err := b.svcLister.GetPodServices(pod)
 		if err != nil {
-			return nil, fmt.Errorf("unable to get pod %q services: %w", pod.Name, err)
+			return nil, fmt.Errorf("unable to get pod services for pod %s/%s: %w", pod.Namespace, pod.Name, err)
 		}
 
 		for _, service := range services {
@@ -250,7 +276,7 @@ func (b *TopologyBuilder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameName
 	return podsBySa
 }
 
-func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *v1alpha1.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) map[NameNamespace]ServiceTrafficTargetSource {
+func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) map[NameNamespace]ServiceTrafficTargetSource {
 	sources := make(map[NameNamespace]ServiceTrafficTargetSource)
 
 	for _, source := range tt.Sources {
@@ -272,13 +298,13 @@ func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *v1alpha1.Tr
 	return sources
 }
 
-func (b *TopologyBuilder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *v1alpha1.TrafficTarget) ([]int32, error) {
+func (b *TopologyBuilder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.TrafficTarget) ([]int32, error) {
 	var destPorts []int32
 
 	if tt.Destination.Port != "" {
 		port, err := strconv.ParseInt(tt.Destination.Port, 10, 32)
 		if err != nil {
-			return nil, fmt.Errorf("destination port of TrafficTarget %q is not a valid port: %w", tt.Name, err)
+			return nil, fmt.Errorf("destination port of TrafficTarget %s/%s is not a valid port: %w", tt.Namespace, tt.Name, err)
 		}
 		destPorts = []int32{int32(port)}
 	} else {
@@ -288,6 +314,67 @@ func (b *TopologyBuilder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *
 	}
 
 	return destPorts, nil
+}
+
+func (b *TopologyBuilder) buildTrafficTargetSpecs(topology *Topology, tt *access.TrafficTarget) ([]TrafficSpec, error) {
+	var trafficSpecs []TrafficSpec
+
+	for _, s := range tt.Specs {
+		var trafficSpec TrafficSpec
+
+		switch s.Kind {
+		case "HTTPRouteGroup":
+			key := NameNamespace{s.Name, tt.Namespace}
+			httpRouteGroup, ok := topology.HTTPRouteGroups[key]
+			if !ok {
+				return []TrafficSpec{}, fmt.Errorf("unable to get HTTPRouteGroup %s/%s", tt.Namespace, s.Name)
+			}
+
+			var httpMatches []*spec.HTTPMatch
+			if len(s.Matches) == 0 {
+				httpMatches := make([]*spec.HTTPMatch, len(httpRouteGroup.Matches))
+				for i, match := range httpRouteGroup.Matches {
+					httpMatches[i] = &match
+				}
+			} else {
+				for _, name := range s.Matches {
+					var found bool
+
+					for _, match := range httpRouteGroup.Matches {
+						found = match.Name == name
+
+						if found {
+							httpMatches = append(httpMatches, &match)
+							break
+						}
+					}
+
+					if !found {
+						return []TrafficSpec{}, fmt.Errorf("unable to find match %q in HTTPRouteGroup %s/%s", name, tt.Namespace, s.Name)
+					}
+				}
+			}
+
+			trafficSpec = TrafficSpec{
+				HTTPRouteGroup: httpRouteGroup,
+				HTTPMatches:    httpMatches,
+			}
+		case "TCPRoute":
+			key := NameNamespace{s.Name, tt.Namespace}
+			tcpRoute, ok := topology.TCPRoutes[key]
+			if !ok {
+				return []TrafficSpec{}, fmt.Errorf("unable to get TCPRoute %s/%s", tt.Namespace, s.Name)
+			}
+
+			trafficSpec = TrafficSpec{TCPRoute: tcpRoute}
+		default:
+			return []TrafficSpec{}, fmt.Errorf("unknown spec type: %q", s.Kind)
+		}
+
+		trafficSpecs = append(trafficSpecs, trafficSpec)
+	}
+
+	return trafficSpecs, nil
 }
 
 func getOrCreatePod(topology *Topology, pod *v1.Pod) *Pod {
@@ -309,7 +396,6 @@ func getOrCreatePod(topology *Topology, pod *v1.Pod) *Pod {
 func getOrCreateService(topology *Topology, svc *v1.Service) *Service {
 	svcKey := NameNamespace{svc.Name, svc.Namespace}
 
-	// Create the service if it doesn't exist yet.
 	if _, ok := topology.Services[svcKey]; !ok {
 		topology.Services[svcKey] = &Service{
 			Name:           svc.Name,

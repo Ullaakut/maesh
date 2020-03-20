@@ -2,8 +2,10 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
+
 	corev1 "k8s.io/api/core/v1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -17,15 +19,19 @@ type Topology struct {
 	Services     map[NameNamespace]*Service
 	Pods         map[NameNamespace]*Pod
 	TrafficSpecs map[NameNamespace]*TrafficSpec
+
+	HTTPRouteGroups map[NameNamespace]*v1alpha1.HTTPRouteGroup
+	TCPRoutes       map[NameNamespace]*v1alpha1.TCPRoute
 }
 
 func NewTopology() *Topology {
 	return &Topology{
-		Services:     make(map[NameNamespace]*Service),
-		Pods:         make(map[NameNamespace]*Pod),
-		TrafficSpecs: make(map[NameNamespace]*TrafficSpec),
+		Services:        make(map[NameNamespace]*Service),
+		Pods:            make(map[NameNamespace]*Pod),
+		TrafficSpecs:    make(map[NameNamespace]*TrafficSpec),
+		HTTPRouteGroups: make(map[NameNamespace]*v1alpha1.HTTPRouteGroup),
+		TCPRoutes:       make(map[NameNamespace]*v1alpha1.TCPRoute),
 	}
-
 }
 
 type Service struct {
@@ -46,7 +52,7 @@ type ServiceTrafficTarget struct {
 
 	Sources     map[NameNamespace]ServiceTrafficTargetSource
 	Destination ServiceTrafficTargetDestination
-	Specs       []*TrafficSpec
+	Specs       []TrafficSpec
 }
 
 type ServiceTrafficTargetSource struct {
@@ -63,11 +69,10 @@ type ServiceTrafficTargetDestination struct {
 }
 
 type TrafficSpec struct {
-	Name      string
-	Namespace string
-
 	HTTPRouteGroup *v1alpha1.HTTPRouteGroup
 	TCPRoute       *v1alpha1.TCPRoute
+
+	HTTPMatches []*v1alpha1.HTTPMatch
 }
 
 type Pod struct {
@@ -87,7 +92,6 @@ type TrafficSplit struct {
 
 	Service  *Service
 	Backends []TrafficSplitBackend
-	Specs    []*TrafficSpec
 }
 
 type TrafficSplitBackend struct {
@@ -159,6 +163,22 @@ func (t *Topology) Dump() string {
 					s += leftPadf(5, "Pods: %s", tt.Destination.Namespace)
 					for _, pod := range tt.Destination.Pods {
 						s += leftPadf(6, "- %s/%s", pod.Namespace, pod.Name)
+					}
+				}
+
+				if len(tt.Specs) > 0 {
+					s += leftPadf(4, "Specs:")
+					for _, spec := range tt.Specs {
+						if spec.HTTPRouteGroup != nil {
+							s += leftPadf(5, "[%s:%s-%s]", spec.HTTPRouteGroup.Kind, spec.HTTPRouteGroup.Namespace, spec.HTTPRouteGroup.Name)
+							for _, match := range spec.HTTPRouteGroup.Matches {
+								s += leftPadf(6, "- name=%s pathRegex=%s methods=%s", match.Name, match.PathRegex, strings.Join(match.Methods, ","))
+							}
+						}
+
+						if spec.TCPRoute != nil {
+							s += leftPadf(5, "[%s:%s-%s]", spec.TCPRoute.Kind, spec.TCPRoute.Namespace, spec.TCPRoute.Name)
+						}
 					}
 				}
 
