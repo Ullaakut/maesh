@@ -112,7 +112,10 @@ func (t *Topology) Dump() string {
 		if len(service.Annotations) > 0 {
 			s += leftPadf(2, "Annotations:")
 			for k, v := range service.Annotations {
-				shortval := v[:25]
+				shortval := v
+				if len(v) > 25 {
+					shortval = v[:25]
+				}
 				if len(shortval) < len(v) {
 					shortval += "..."
 				}

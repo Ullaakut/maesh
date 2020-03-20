@@ -89,8 +89,25 @@ func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessC
 	}, nil
 }
 
-func (b *TopologyBuilder) Build(acl bool) (*Topology, error) {
+func (b *TopologyBuilder) Build() (*Topology, error) {
 	topology := NewTopology()
+
+	services, err := b.svcLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list Services: %w", err)
+	}
+	for _, svc := range services {
+		svcKey := NameNamespace{svc.Name, svc.Namespace}
+		topology.Services[svcKey] = &Service{
+			Name:           svc.Name,
+			Namespace:      svc.Namespace,
+			Selector:       svc.Spec.Selector,
+			Annotations:    svc.Annotations,
+			Ports:          svc.Spec.Ports,
+			ClusterIP:      svc.Spec.ClusterIP,
+			TrafficTargets: make(map[string]*ServiceTrafficTarget),
+		}
+	}
 
 	httpRouteGroups, err := b.httpRouteGroupLister.List(labels.Everything())
 	if err != nil {
@@ -110,15 +127,13 @@ func (b *TopologyBuilder) Build(acl bool) (*Topology, error) {
 		topology.TCPRoutes[key] = tcpRoute
 	}
 
-	if acl {
-		trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
-		if err != nil {
-			return nil, fmt.Errorf("unable to list TrafficTargets: %w", err)
-		}
+	trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
+	if err != nil {
+		return nil, fmt.Errorf("unable to list TrafficTargets: %w", err)
+	}
 
-		if err := b.buildServicesFromTrafficTargets(topology, trafficTargets); err != nil {
-			return nil, err
-		}
+	if err := b.buildServicesFromTrafficTargets(topology, trafficTargets); err != nil {
+		return nil, err
 	}
 
 	trafficSplits, err := b.trafficSplitLister.List(labels.Everything())
@@ -166,7 +181,11 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 		}
 
 		for service, pods := range podsBySvc {
-			svc := getOrCreateService(topology, service)
+			svcKey := NameNamespace{service.Name, service.Namespace}
+			svc, ok := topology.Services[svcKey]
+			if !ok {
+				return fmt.Errorf("unable to find Service %s/%s", service.Namespace, service.Name)
+			}
 
 			// Find out who are the destination pods.
 			destPods := make([]*Pod, len(pods))
@@ -215,23 +234,23 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 
 func (b *TopologyBuilder) buildServicesFromTrafficSplits(topology *Topology, trafficSplits []*split.TrafficSplit) error {
 	for _, trafficSplit := range trafficSplits {
-		k8sSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(trafficSplit.Spec.Service)
-		if err != nil {
-			return fmt.Errorf("unable to find Service %s/%s: %w", trafficSplit.Namespace, trafficSplit.Spec.Service, err)
+		svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
+		svc, ok := topology.Services[svcKey]
+		if !ok {
+			return fmt.Errorf("unable to find Service %s/%s", trafficSplit.Namespace, trafficSplit.Spec.Service)
 		}
-
-		svc := getOrCreateService(topology, k8sSvc)
 
 		backends := make([]TrafficSplitBackend, len(trafficSplit.Spec.Backends))
 		for i, backend := range trafficSplit.Spec.Backends {
-			k8sBackendSvc, err := b.svcLister.Services(trafficSplit.Namespace).Get(backend.Service)
-			if err != nil {
-				return fmt.Errorf("unable to find Service %s/%s: %w", trafficSplit.Namespace, backend.Service, err)
+			backendSvcKey := NameNamespace{backend.Service, trafficSplit.Namespace}
+			backendSvc, ok := topology.Services[backendSvcKey]
+			if !ok {
+				return fmt.Errorf("unable to find Service %s/%s", trafficSplit.Namespace, backend.Service)
 			}
 
 			backends[i] = TrafficSplitBackend{
 				Weight:  backend.Weight,
-				Service: getOrCreateService(topology, k8sBackendSvc),
+				Service: backendSvc,
 			}
 
 		}
@@ -391,22 +410,4 @@ func getOrCreatePod(topology *Topology, pod *v1.Pod) *Pod {
 	}
 
 	return topology.Pods[podKey]
-}
-
-func getOrCreateService(topology *Topology, svc *v1.Service) *Service {
-	svcKey := NameNamespace{svc.Name, svc.Namespace}
-
-	if _, ok := topology.Services[svcKey]; !ok {
-		topology.Services[svcKey] = &Service{
-			Name:           svc.Name,
-			Namespace:      svc.Namespace,
-			Selector:       svc.Spec.Selector,
-			Annotations:    svc.Annotations,
-			Ports:          svc.Spec.Ports,
-			ClusterIP:      svc.Spec.ClusterIP,
-			TrafficTargets: make(map[string]*ServiceTrafficTarget),
-		}
-	}
-
-	return topology.Services[svcKey]
 }

@@ -47,7 +47,7 @@ func main() {
 		fmt.Printf("unable to create topology builder: %v\n", err)
 		return
 	}
-	topology, err := builder.Build(true)
+	topology, err := builder.Build()
 	if err != nil {
 		fmt.Printf("unable to build topology: %v\n", err)
 		return
