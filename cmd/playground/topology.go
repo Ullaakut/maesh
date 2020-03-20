@@ -4,6 +4,9 @@ import (
 	"fmt"
 	"strings"
 
+	v1alpha12 "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
+	"github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
+
 	"github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
 
 	corev1 "k8s.io/api/core/v1"
@@ -20,6 +23,8 @@ type Topology struct {
 	Pods         map[NameNamespace]*Pod
 	TrafficSpecs map[NameNamespace]*TrafficSpec
 
+	TrafficTargets  map[NameNamespace]*v1alpha12.TrafficTarget
+	TrafficSplits   map[NameNamespace]*v1alpha2.TrafficSplit
 	HTTPRouteGroups map[NameNamespace]*v1alpha1.HTTPRouteGroup
 	TCPRoutes       map[NameNamespace]*v1alpha1.TCPRoute
 }
@@ -29,6 +34,8 @@ func NewTopology() *Topology {
 		Services:        make(map[NameNamespace]*Service),
 		Pods:            make(map[NameNamespace]*Pod),
 		TrafficSpecs:    make(map[NameNamespace]*TrafficSpec),
+		TrafficTargets:  make(map[NameNamespace]*v1alpha12.TrafficTarget),
+		TrafficSplits:   make(map[NameNamespace]*v1alpha2.TrafficSplit),
 		HTTPRouteGroups: make(map[NameNamespace]*v1alpha1.HTTPRouteGroup),
 		TCPRoutes:       make(map[NameNamespace]*v1alpha1.TCPRoute),
 	}

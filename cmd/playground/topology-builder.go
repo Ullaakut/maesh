@@ -7,9 +7,9 @@ import (
 	"strconv"
 	"time"
 
+	mk8s "github.com/containous/maesh/pkg/k8s"
 	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
-	split "github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
 	accessclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned"
 	accessinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
 	accessLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/listers/access/v1alpha1"
@@ -89,65 +89,38 @@ func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessC
 	}, nil
 }
 
-func (b *TopologyBuilder) Build() (*Topology, error) {
+func (b *TopologyBuilder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	topology := NewTopology()
 
-	services, err := b.svcLister.List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list Services: %w", err)
+	// Gather resources required for building the graph.
+	if err := b.gatherServices(topology, ignored); err != nil {
+		return nil, fmt.Errorf("unable to gather Services: %w", err)
 	}
-	for _, svc := range services {
-		svcKey := NameNamespace{svc.Name, svc.Namespace}
-		topology.Services[svcKey] = &Service{
-			Name:           svc.Name,
-			Namespace:      svc.Namespace,
-			Selector:       svc.Spec.Selector,
-			Annotations:    svc.Annotations,
-			Ports:          svc.Spec.Ports,
-			ClusterIP:      svc.Spec.ClusterIP,
-			TrafficTargets: make(map[string]*ServiceTrafficTarget),
-		}
+	if err := b.gatherTrafficTargets(topology, ignored); err != nil {
+		return nil, fmt.Errorf("unable to gather TrafficTargets: %w", err)
 	}
-
-	httpRouteGroups, err := b.httpRouteGroupLister.List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list HTTPRouteGroups: %w", err)
+	if err := b.gatherTrafficSplits(topology, ignored); err != nil {
+		return nil, fmt.Errorf("unable to gather TrafficSplits: %w", err)
 	}
-	for _, httpRouteGroup := range httpRouteGroups {
-		key := NameNamespace{httpRouteGroup.Name, httpRouteGroup.Namespace}
-		topology.HTTPRouteGroups[key] = httpRouteGroup
+	if err := b.gatherHTTPRouteGroups(topology, ignored); err != nil {
+		return nil, fmt.Errorf("unable to gather HTTPRouteGroups: %w", err)
+	}
+	if err := b.gatherTCPRoutes(topology, ignored); err != nil {
+		return nil, fmt.Errorf("unable to gather TCPRoutes: %w", err)
 	}
 
-	tcpRoutes, err := b.tcpRoutesLister.List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list TCPRouteGroups")
+	// Build the graph.
+	if err := b.evaluateTrafficTargets(topology); err != nil {
+		return nil, fmt.Errorf("unable to evaluate TrafficTargets: %w", err)
 	}
-	for _, tcpRoute := range tcpRoutes {
-		key := NameNamespace{tcpRoute.Name, tcpRoute.Namespace}
-		topology.TCPRoutes[key] = tcpRoute
-	}
-
-	trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list TrafficTargets: %w", err)
-	}
-
-	if err := b.buildServicesFromTrafficTargets(topology, trafficTargets); err != nil {
-		return nil, err
-	}
-
-	trafficSplits, err := b.trafficSplitLister.List(labels.Everything())
-	if err != nil {
-		return nil, fmt.Errorf("unable to list TrafficSplits: %w", err)
-	}
-	if err := b.buildServicesFromTrafficSplits(topology, trafficSplits); err != nil {
-		return nil, err
+	if err := b.evaluateTrafficSplits(topology); err != nil {
+		return nil, fmt.Errorf("unable to evaluate TrafficSplits: %w", err)
 	}
 
 	return topology, nil
 }
 
-func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, trafficTargets []*access.TrafficTarget) error {
+func (b *TopologyBuilder) evaluateTrafficTargets(topology *Topology) error {
 	// Group pods by service account.
 	pods, err := b.podLister.List(labels.Everything())
 	if err != nil {
@@ -162,7 +135,7 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 	// - Create a new "ServiceTrafficTarget" for each new "Service" and link them together.
 	// - And Finally, we link "Pod"s with the "ServiceTrafficTarget". In the Pod.Outgoing for source pods and in
 	// Pod.Incoming for destination pods.
-	for _, trafficTarget := range trafficTargets {
+	for _, trafficTarget := range topology.TrafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
 
 		// Group destination pods by service.
@@ -232,8 +205,8 @@ func (b *TopologyBuilder) buildServicesFromTrafficTargets(topology *Topology, tr
 	return nil
 }
 
-func (b *TopologyBuilder) buildServicesFromTrafficSplits(topology *Topology, trafficSplits []*split.TrafficSplit) error {
-	for _, trafficSplit := range trafficSplits {
+func (b *TopologyBuilder) evaluateTrafficSplits(topology *Topology) error {
+	for _, trafficSplit := range topology.TrafficSplits {
 		svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
 		svc, ok := topology.Services[svcKey]
 		if !ok {
@@ -394,6 +367,99 @@ func (b *TopologyBuilder) buildTrafficTargetSpecs(topology *Topology, tt *access
 	}
 
 	return trafficSpecs, nil
+}
+
+func (b *TopologyBuilder) gatherServices(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+	services, err := b.svcLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("unable to list Services: %w", err)
+	}
+	for _, svc := range services {
+		if ignored.IsIgnored(svc.ObjectMeta) {
+			continue
+		}
+
+		svcKey := NameNamespace{svc.Name, svc.Namespace}
+		topology.Services[svcKey] = &Service{
+			Name:           svc.Name,
+			Namespace:      svc.Namespace,
+			Selector:       svc.Spec.Selector,
+			Annotations:    svc.Annotations,
+			Ports:          svc.Spec.Ports,
+			ClusterIP:      svc.Spec.ClusterIP,
+			TrafficTargets: make(map[string]*ServiceTrafficTarget),
+		}
+	}
+
+	return nil
+}
+
+func (b *TopologyBuilder) gatherHTTPRouteGroups(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+	httpRouteGroups, err := b.httpRouteGroupLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("unable to list HTTPRouteGroups: %w", err)
+	}
+	for _, httpRouteGroup := range httpRouteGroups {
+		if ignored.IsIgnored(httpRouteGroup.ObjectMeta) {
+			continue
+		}
+
+		key := NameNamespace{httpRouteGroup.Name, httpRouteGroup.Namespace}
+		topology.HTTPRouteGroups[key] = httpRouteGroup
+	}
+
+	return nil
+}
+
+func (b *TopologyBuilder) gatherTCPRoutes(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+	tcpRoutes, err := b.tcpRoutesLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("unable to list TCPRouteGroups")
+	}
+	for _, tcpRoute := range tcpRoutes {
+		if ignored.IsIgnored(tcpRoute.ObjectMeta) {
+			continue
+		}
+
+		key := NameNamespace{tcpRoute.Name, tcpRoute.Namespace}
+		topology.TCPRoutes[key] = tcpRoute
+	}
+
+	return nil
+}
+
+func (b *TopologyBuilder) gatherTrafficTargets(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+	trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("unable to list TrafficTargets: %w", err)
+	}
+	for _, trafficTarget := range trafficTargets {
+		if ignored.IsIgnored(trafficTarget.ObjectMeta) {
+			continue
+		}
+
+		key := NameNamespace{trafficTarget.Name, trafficTarget.Namespace}
+		topology.TrafficTargets[key] = trafficTarget
+	}
+
+	return nil
+}
+
+func (b *TopologyBuilder) gatherTrafficSplits(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+	trafficSplits, err := b.trafficSplitLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("unable to list TrafficSplits: %w", err)
+	}
+	for _, trafficSplit := range trafficSplits {
+		if ignored.IsIgnored(trafficSplit.ObjectMeta) {
+			continue
+		}
+
+		key := NameNamespace{trafficSplit.Name, trafficSplit.Namespace}
+		topology.TrafficSplits[key] = trafficSplit
+	}
+
+	return nil
 }
 
 func getOrCreatePod(topology *Topology, pod *v1.Pod) *Pod {

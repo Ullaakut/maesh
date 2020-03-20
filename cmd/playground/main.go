@@ -5,6 +5,9 @@ import (
 	"fmt"
 	"log"
 
+	mk8s "github.com/containous/maesh/pkg/k8s"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	accessClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned"
 	specsClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned"
 	splitClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
@@ -47,7 +50,20 @@ func main() {
 		fmt.Printf("unable to create topology builder: %v\n", err)
 		return
 	}
-	topology, err := builder.Build()
+
+	ignored := mk8s.NewIgnored()
+
+	ignoredNamespaces := []string{"cool"}
+
+	for _, ns := range ignoredNamespaces {
+		ignored.AddIgnoredNamespace(ns)
+	}
+
+	ignored.AddIgnoredService("kubernetes", metav1.NamespaceDefault)
+	ignored.AddIgnoredNamespace(metav1.NamespaceSystem)
+	ignored.AddIgnoredApps("maesh", "jaeger")
+
+	topology, err := builder.Build(ignored)
 	if err != nil {
 		fmt.Printf("unable to build topology: %v\n", err)
 		return
