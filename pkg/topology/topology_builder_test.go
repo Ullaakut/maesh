@@ -604,6 +604,41 @@ func createService(
 	}
 }
 
+func createEndpoints(svc *corev1.Service, pods []*corev1.Pod) *corev1.Endpoints {
+	ports := make([]corev1.EndpointPort, len(svc.Spec.Ports))
+	for i, port := range svc.Spec.Ports {
+		ports[i] = corev1.EndpointPort{
+			Name:     port.Name,
+			Port:     port.TargetPort.IntVal,
+			Protocol: port.Protocol,
+		}
+	}
+
+	addresses := make([]corev1.EndpointAddress, len(pods))
+	for i, pod := range pods {
+		addresses[i] = corev1.EndpointAddress{
+			IP: pod.Status.PodIP,
+		}
+	}
+
+	return &corev1.Endpoints{
+		TypeMeta: metav1.TypeMeta{
+			Kind:       "Endpoints",
+			APIVersion: "apps/v1",
+		},
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      svc.Name,
+			Namespace: svc.Namespace,
+		},
+		Subsets: []corev1.EndpointSubset{
+			{
+				Addresses: addresses,
+				Ports:     ports,
+			},
+		},
+	}
+}
+
 func createPod(ns, name string,
 	sa *corev1.ServiceAccount,
 	selector map[string]string,

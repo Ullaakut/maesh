@@ -381,6 +381,9 @@ func (b *TopologyBuilder) gatherServices(topology *Topology, ignored mk8s.Ignore
 			continue
 		}
 
+		// Error intentionally not handled, a service may not have an endpoints but we still want it listed.
+		eps, _ := b.epLister.Endpoints(svc.Namespace).Get(svc.Name)
+
 		svcKey := NameNamespace{svc.Name, svc.Namespace}
 		topology.Services[svcKey] = &Service{
 			Name:        svc.Name,
@@ -389,6 +392,7 @@ func (b *TopologyBuilder) gatherServices(topology *Topology, ignored mk8s.Ignore
 			Annotations: svc.Annotations,
 			Ports:       svc.Spec.Ports,
 			ClusterIP:   svc.Spec.ClusterIP,
+			Endpoints:   eps,
 		}
 	}
 

@@ -45,6 +45,7 @@ type Service struct {
 	Ports       []corev1.ServicePort
 	ClusterIP   string
 
+	Endpoints      *corev1.Endpoints
 	TrafficTargets []*ServiceTrafficTarget
 	TrafficSplits  []*TrafficSplit
 }
