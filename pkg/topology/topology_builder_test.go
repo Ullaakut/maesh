@@ -2,21 +2,33 @@ package topology_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
-	"github.com/containous/maesh/pkg/k8s"
+	accessInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
+	specsInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/informers/externalversions"
+	splitInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/informers/externalversions"
+
+	"k8s.io/client-go/informers"
+
+	mk8s "github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/topology"
 	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
 	split "github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
+	accessclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned"
 	accessfake "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned/fake"
+	specsclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned"
 	specfake "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned/fake"
+	splitclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
 	splitfake "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned/fake"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	k8s "k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
 )
 
@@ -52,11 +64,10 @@ func TestTopologyBuilder_BuildIgnoresNamespaces(t *testing.T) {
 	smiSplitClient := splitfake.NewSimpleClientset(ts)
 	smiSpecClient := specfake.NewSimpleClientset(rtGrp)
 
-	ctx := context.Background()
-	builder, err := topology.NewTopologyBuilder(ctx, k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
+	builder, err := createBuilder(k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
 	require.NoError(t, err)
 
-	ignored := k8s.NewIgnored()
+	ignored := mk8s.NewIgnored()
 	ignored.AddIgnoredNamespace("ignored-ns")
 
 	got, err := builder.Build(ignored)
@@ -108,11 +119,10 @@ func TestTopologyBuilder_BuildWithTrafficTargetAndTrafficSplit(t *testing.T) {
 	smiSplitClient := splitfake.NewSimpleClientset(ts)
 	smiSpecClient := specfake.NewSimpleClientset(rtGrp)
 
-	ctx := context.Background()
-	builder, err := topology.NewTopologyBuilder(ctx, k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
+	builder, err := createBuilder(k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
 	require.NoError(t, err)
 
-	ignored := k8s.NewIgnored()
+	ignored := mk8s.NewIgnored()
 	got, err := builder.Build(ignored)
 	require.NoError(t, err)
 
@@ -218,11 +228,10 @@ func TestTopologyBuilder_BuildWithTrafficTargetSpecEmptyMatch(t *testing.T) {
 	smiSplitClient := splitfake.NewSimpleClientset()
 	smiSpecClient := specfake.NewSimpleClientset(rtGrp)
 
-	ctx := context.Background()
-	builder, err := topology.NewTopologyBuilder(ctx, k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
+	builder, err := createBuilder(k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
 	require.NoError(t, err)
 
-	ignored := k8s.NewIgnored()
+	ignored := mk8s.NewIgnored()
 	got, err := builder.Build(ignored)
 	require.NoError(t, err)
 
@@ -306,11 +315,10 @@ func TestTopologyBuilder_BuildWithTrafficTargetEmptyDestinationPort(t *testing.T
 	smiSplitClient := splitfake.NewSimpleClientset()
 	smiSpecClient := specfake.NewSimpleClientset()
 
-	ctx := context.Background()
-	builder, err := topology.NewTopologyBuilder(ctx, k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
+	builder, err := createBuilder(k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
 	require.NoError(t, err)
 
-	ignored := k8s.NewIgnored()
+	ignored := mk8s.NewIgnored()
 	got, err := builder.Build(ignored)
 	require.NoError(t, err)
 
@@ -386,11 +394,10 @@ func TestTopologyBuilder_BuildTrafficTargetMultipleSourcesAndDestinations(t *tes
 	smiSplitClient := splitfake.NewSimpleClientset()
 	smiSpecClient := specfake.NewSimpleClientset()
 
-	ctx := context.Background()
-	builder, err := topology.NewTopologyBuilder(ctx, k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
+	builder, err := createBuilder(k8sClient, smiAccessClient, smiSpecClient, smiSplitClient)
 	require.NoError(t, err)
 
-	ignored := k8s.NewIgnored()
+	ignored := mk8s.NewIgnored()
 	got, err := builder.Build(ignored)
 	require.NoError(t, err)
 
@@ -450,6 +457,66 @@ func TestTopologyBuilder_BuildTrafficTargetMultipleSourcesAndDestinations(t *tes
 	}
 
 	assert.Equal(t, want, got)
+}
+
+func createBuilder(
+	k8sClient k8s.Interface,
+	smiAccessClient accessclient.Interface,
+	smiSpecClient specsclient.Interface,
+	smiSplitClient splitclient.Interface) (*topology.Builder, error) {
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	k8sFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, mk8s.ResyncPeriod)
+
+	svcLister := k8sFactory.Core().V1().Services().Lister()
+	podLister := k8sFactory.Core().V1().Pods().Lister()
+	epLister := k8sFactory.Core().V1().Endpoints().Lister()
+
+	accessFactory := accessInformer.NewSharedInformerFactoryWithOptions(smiAccessClient, mk8s.ResyncPeriod)
+	splitFactory := splitInformer.NewSharedInformerFactoryWithOptions(smiSplitClient, mk8s.ResyncPeriod)
+	specsFactory := specsInformer.NewSharedInformerFactoryWithOptions(smiSpecClient, mk8s.ResyncPeriod)
+
+	trafficTargetLister := accessFactory.Access().V1alpha1().TrafficTargets().Lister()
+	trafficSplitLister := splitFactory.Split().V1alpha2().TrafficSplits().Lister()
+	httpRouteGroupLister := specsFactory.Specs().V1alpha1().HTTPRouteGroups().Lister()
+	tcpRouteLister := specsFactory.Specs().V1alpha1().TCPRoutes().Lister()
+
+	k8sFactory.Start(ctx.Done())
+	accessFactory.Start(ctx.Done())
+	splitFactory.Start(ctx.Done())
+	specsFactory.Start(ctx.Done())
+
+	for t, ok := range k8sFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
+		}
+	}
+	for t, ok := range accessFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
+		}
+	}
+	for t, ok := range splitFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
+		}
+	}
+	for t, ok := range specsFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
+		}
+	}
+
+	return topology.NewBuilder(
+		svcLister,
+		epLister,
+		podLister,
+		trafficTargetLister,
+		trafficSplitLister,
+		httpRouteGroupLister,
+		tcpRouteLister), nil
 }
 
 func podToTopologyPod(pod *corev1.Pod) *topology.Pod {

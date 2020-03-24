@@ -1,32 +1,21 @@
 package topology
 
 import (
-	"context"
-	"errors"
 	"fmt"
 	"strconv"
-	"time"
 
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
-	accessclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned"
-	accessinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
 	accessLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/listers/access/v1alpha1"
-	specsclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned"
-	specsinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/informers/externalversions"
 	specLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/listers/specs/v1alpha1"
-	splitclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
-	splitinformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/informers/externalversions"
 	splitLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/listers/split/v1alpha2"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/informers"
-	k8s "k8s.io/client-go/kubernetes"
 	listers "k8s.io/client-go/listers/core/v1"
 )
 
-type TopologyBuilder struct {
+type Builder struct {
 	svcLister            listers.ServiceLister
 	epLister             listers.EndpointsLister
 	podLister            listers.PodLister
@@ -36,49 +25,16 @@ type TopologyBuilder struct {
 	tcpRoutesLister      specLister.TCPRouteLister
 }
 
-func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessClient accessclient.Interface, smiSpecClient specsclient.Interface, smiSplitClient splitclient.Interface) (*TopologyBuilder, error) {
-	k8sInformerFact := informers.NewSharedInformerFactoryWithOptions(k8sClient, 5*time.Minute)
-	smiAccessInformerFact := accessinformer.NewSharedInformerFactoryWithOptions(smiAccessClient, 5*time.Minute)
-	smiSpecInformerFact := specsinformer.NewSharedInformerFactoryWithOptions(smiSpecClient, 5*time.Minute)
-	smiSplitInformerFact := splitinformer.NewSharedInformerFactoryWithOptions(smiSplitClient, 5*time.Minute)
+func NewBuilder(
+	svcLister listers.ServiceLister,
+	epLister listers.EndpointsLister,
+	podLister listers.PodLister,
+	trafficTargetLister accessLister.TrafficTargetLister,
+	trafficSplitLister splitLister.TrafficSplitLister,
+	httpRouteGroupLister specLister.HTTPRouteGroupLister,
+	tcpRouteLister specLister.TCPRouteLister) *Builder {
 
-	svcLister := k8sInformerFact.Core().V1().Services().Lister()
-	epLister := k8sInformerFact.Core().V1().Endpoints().Lister()
-	podLister := k8sInformerFact.Core().V1().Pods().Lister()
-	trafficTargetLister := smiAccessInformerFact.Access().V1alpha1().TrafficTargets().Lister()
-	httpRouteGroupLister := smiSpecInformerFact.Specs().V1alpha1().HTTPRouteGroups().Lister()
-	tcpRouteLister := smiSpecInformerFact.Specs().V1alpha1().TCPRoutes().Lister()
-	trafficSplitLister := smiSplitInformerFact.Split().V1alpha2().TrafficSplits().Lister()
-
-	k8sInformerFact.Start(ctx.Done())
-	for _, ok := range k8sInformerFact.WaitForCacheSync(ctx.Done()) {
-		if !ok {
-			return nil, errors.New("unable to start k8s informers")
-		}
-	}
-
-	smiAccessInformerFact.Start(ctx.Done())
-	for _, ok := range smiAccessInformerFact.WaitForCacheSync(ctx.Done()) {
-		if !ok {
-			return nil, errors.New("unable to start smi access informers")
-		}
-	}
-
-	smiSpecInformerFact.Start(ctx.Done())
-	for _, ok := range smiSpecInformerFact.WaitForCacheSync(ctx.Done()) {
-		if !ok {
-			return nil, errors.New("unable to start smi spec informers")
-		}
-	}
-
-	smiSplitInformerFact.Start(ctx.Done())
-	for _, ok := range smiSplitInformerFact.WaitForCacheSync(ctx.Done()) {
-		if !ok {
-			return nil, errors.New("unable to start smi split informers")
-		}
-	}
-
-	return &TopologyBuilder{
+	return &Builder{
 		svcLister:            svcLister,
 		epLister:             epLister,
 		podLister:            podLister,
@@ -86,10 +42,10 @@ func NewTopologyBuilder(ctx context.Context, k8sClient k8s.Interface, smiAccessC
 		trafficSplitLister:   trafficSplitLister,
 		httpRouteGroupLister: httpRouteGroupLister,
 		tcpRoutesLister:      tcpRouteLister,
-	}, nil
+	}
 }
 
-func (b *TopologyBuilder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
+func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	topology := NewTopology()
 
 	// Gather resources required for building the graph.
@@ -120,7 +76,7 @@ func (b *TopologyBuilder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	return topology, nil
 }
 
-func (b *TopologyBuilder) evaluateTrafficTargets(topology *Topology) error {
+func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	// Group pods by service account.
 	pods, err := b.podLister.List(labels.Everything())
 	if err != nil {
@@ -138,6 +94,7 @@ func (b *TopologyBuilder) evaluateTrafficTargets(topology *Topology) error {
 	for _, trafficTarget := range topology.TrafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
 
+		//
 		// Group destination pods by service.
 		podsBySvc, err := b.groupPodsByService(podsBySa[destSaKey])
 		if err != nil {
@@ -206,7 +163,7 @@ func (b *TopologyBuilder) evaluateTrafficTargets(topology *Topology) error {
 	return nil
 }
 
-func (b *TopologyBuilder) evaluateTrafficSplits(topology *Topology) error {
+func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 	for _, trafficSplit := range topology.TrafficSplits {
 		svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
 		svc, ok := topology.Services[svcKey]
@@ -240,7 +197,7 @@ func (b *TopologyBuilder) evaluateTrafficSplits(topology *Topology) error {
 	return nil
 }
 
-func (b *TopologyBuilder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {
+func (b *Builder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {
 	podsBySvc := make(map[*v1.Service][]*v1.Pod)
 
 	for _, pod := range pods {
@@ -257,7 +214,7 @@ func (b *TopologyBuilder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]
 	return podsBySvc, nil
 }
 
-func (b *TopologyBuilder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameNamespace][]*v1.Pod {
+func (b *Builder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameNamespace][]*v1.Pod {
 	podsBySa := make(map[NameNamespace][]*v1.Pod)
 
 	for _, pod := range pods {
@@ -269,7 +226,7 @@ func (b *TopologyBuilder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameName
 	return podsBySa
 }
 
-func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) []ServiceTrafficTargetSource {
+func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) []ServiceTrafficTargetSource {
 	sources := make([]ServiceTrafficTargetSource, len(tt.Sources))
 
 	for i, source := range tt.Sources {
@@ -291,7 +248,7 @@ func (b *TopologyBuilder) buildTrafficTargetSources(t *Topology, tt *access.Traf
 	return sources
 }
 
-func (b *TopologyBuilder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.TrafficTarget) ([]int32, error) {
+func (b *Builder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.TrafficTarget) ([]int32, error) {
 	var destPorts []int32
 
 	if tt.Destination.Port != "" {
@@ -309,7 +266,7 @@ func (b *TopologyBuilder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *
 	return destPorts, nil
 }
 
-func (b *TopologyBuilder) buildTrafficTargetSpecs(topology *Topology, tt *access.TrafficTarget) ([]TrafficSpec, error) {
+func (b *Builder) buildTrafficTargetSpecs(topology *Topology, tt *access.TrafficTarget) ([]TrafficSpec, error) {
 	var trafficSpecs []TrafficSpec
 
 	for _, s := range tt.Specs {
@@ -371,7 +328,7 @@ func (b *TopologyBuilder) buildTrafficTargetSpecs(topology *Topology, tt *access
 	return trafficSpecs, nil
 }
 
-func (b *TopologyBuilder) gatherServices(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+func (b *Builder) gatherServices(topology *Topology, ignored mk8s.IgnoreWrapper) error {
 	services, err := b.svcLister.List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("unable to list Services: %w", err)
@@ -399,7 +356,7 @@ func (b *TopologyBuilder) gatherServices(topology *Topology, ignored mk8s.Ignore
 	return nil
 }
 
-func (b *TopologyBuilder) gatherHTTPRouteGroups(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+func (b *Builder) gatherHTTPRouteGroups(topology *Topology, ignored mk8s.IgnoreWrapper) error {
 	httpRouteGroups, err := b.httpRouteGroupLister.List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("unable to list HTTPRouteGroups: %w", err)
@@ -416,7 +373,7 @@ func (b *TopologyBuilder) gatherHTTPRouteGroups(topology *Topology, ignored mk8s
 	return nil
 }
 
-func (b *TopologyBuilder) gatherTCPRoutes(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+func (b *Builder) gatherTCPRoutes(topology *Topology, ignored mk8s.IgnoreWrapper) error {
 	tcpRoutes, err := b.tcpRoutesLister.List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("unable to list TCPRouteGroups")
@@ -433,7 +390,7 @@ func (b *TopologyBuilder) gatherTCPRoutes(topology *Topology, ignored mk8s.Ignor
 	return nil
 }
 
-func (b *TopologyBuilder) gatherTrafficTargets(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+func (b *Builder) gatherTrafficTargets(topology *Topology, ignored mk8s.IgnoreWrapper) error {
 	trafficTargets, err := b.trafficTargetLister.List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("unable to list TrafficTargets: %w", err)
@@ -450,7 +407,7 @@ func (b *TopologyBuilder) gatherTrafficTargets(topology *Topology, ignored mk8s.
 	return nil
 }
 
-func (b *TopologyBuilder) gatherTrafficSplits(topology *Topology, ignored mk8s.IgnoreWrapper) error {
+func (b *Builder) gatherTrafficSplits(topology *Topology, ignored mk8s.IgnoreWrapper) error {
 	trafficSplits, err := b.trafficSplitLister.List(labels.Everything())
 	if err != nil {
 		return fmt.Errorf("unable to list TrafficSplits: %w", err)

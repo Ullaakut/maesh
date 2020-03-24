@@ -10,13 +10,14 @@ import (
 	"reflect"
 	"time"
 
+	"github.com/containous/maesh/pkg/provider"
+	"github.com/containous/maesh/pkg/topology"
+
 	"github.com/cenkalti/backoff/v4"
 	"github.com/containous/maesh/pkg/api"
 	"github.com/containous/maesh/pkg/deploylog"
 	"github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/providers/base"
-	"github.com/containous/maesh/pkg/providers/kubernetes"
-	"github.com/containous/maesh/pkg/providers/smi"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	"github.com/containous/traefik/v2/pkg/safe"
 	accessInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
@@ -63,7 +64,7 @@ type Controller struct {
 	configRefreshChan    chan string
 	provider             base.Provider
 	ignored              k8s.IgnoreWrapper
-	smiEnabled           bool
+	aclEnabled           bool
 	defaultMode          string
 	meshNamespace        string
 	tcpStateTable        TCPPortMapper
@@ -86,7 +87,7 @@ type Controller struct {
 // MeshControllerConfig holds the configuration of the mesh controller.
 type MeshControllerConfig struct {
 	Log              logrus.FieldLogger
-	SMIEnabled       bool
+	AclEnabled       bool
 	DefaultMode      string
 	Namespace        string
 	IgnoreNamespaces []string
@@ -120,7 +121,7 @@ func NewMeshController(clients k8s.Client, cfg MeshControllerConfig) (*Controlle
 		log:           cfg.Log,
 		clients:       clients,
 		ignored:       ignored,
-		smiEnabled:    cfg.SMIEnabled,
+		aclEnabled:    cfg.AclEnabled,
 		defaultMode:   cfg.DefaultMode,
 		meshNamespace: cfg.Namespace,
 		apiPort:       cfg.APIPort,
@@ -138,7 +139,11 @@ func NewMeshController(clients k8s.Client, cfg MeshControllerConfig) (*Controlle
 func (c *Controller) init() {
 	// Create a new SharedInformerFactory, and register the event handler to informers.
 	c.kubernetesFactory = informers.NewSharedInformerFactoryWithOptions(c.clients.GetKubernetesClient(), k8s.ResyncPeriod)
+
+	// Create the base listers
 	c.ServiceLister = c.kubernetesFactory.Core().V1().Services().Lister()
+	c.PodLister = c.kubernetesFactory.Core().V1().Pods().Lister()
+	c.EndpointsLister = c.kubernetesFactory.Core().V1().Endpoints().Lister()
 
 	c.serviceManager = NewShadowServiceManager(c.log, c.ServiceLister, c.meshNamespace, c.tcpStateTable, c.defaultMode, c.minHTTPPort, c.maxHTTPPort, c.clients.GetKubernetesClient())
 
@@ -150,38 +155,35 @@ func (c *Controller) init() {
 	c.kubernetesFactory.Core().V1().Endpoints().Informer().AddEventHandler(c.handler)
 	c.kubernetesFactory.Core().V1().Pods().Informer().AddEventHandler(c.handler)
 
-	// Create the base listers
-	c.PodLister = c.kubernetesFactory.Core().V1().Pods().Lister()
-	c.EndpointsLister = c.kubernetesFactory.Core().V1().Endpoints().Lister()
-
 	c.deployLog = deploylog.NewDeployLog(c.log, 1000)
 	c.api = api.NewAPI(c.log, c.apiPort, c.apiHost, &c.lastConfiguration, c.deployLog, c.PodLister, c.meshNamespace)
 
-	if c.smiEnabled {
-		// Create new SharedInformerFactories, and register the event handler to informers.
-		c.accessFactory = accessInformer.NewSharedInformerFactoryWithOptions(c.clients.GetAccessClient(), k8s.ResyncPeriod)
-		c.accessFactory.Access().V1alpha1().TrafficTargets().Informer().AddEventHandler(c.handler)
+	// Create new SharedInformerFactories, and register the event handler to informers.
+	c.accessFactory = accessInformer.NewSharedInformerFactoryWithOptions(c.clients.GetAccessClient(), k8s.ResyncPeriod)
+	c.splitFactory = splitInformer.NewSharedInformerFactoryWithOptions(c.clients.GetSplitClient(), k8s.ResyncPeriod)
+	c.specsFactory = specsInformer.NewSharedInformerFactoryWithOptions(c.clients.GetSpecsClient(), k8s.ResyncPeriod)
 
-		c.specsFactory = specsInformer.NewSharedInformerFactoryWithOptions(c.clients.GetSpecsClient(), k8s.ResyncPeriod)
-		c.specsFactory.Specs().V1alpha1().HTTPRouteGroups().Informer().AddEventHandler(c.handler)
-		c.specsFactory.Specs().V1alpha1().TCPRoutes().Informer().AddEventHandler(c.handler)
+	c.accessFactory.Access().V1alpha1().TrafficTargets().Informer().AddEventHandler(c.handler)
+	c.splitFactory.Split().V1alpha2().TrafficSplits().Informer().AddEventHandler(c.handler)
+	c.specsFactory.Specs().V1alpha1().HTTPRouteGroups().Informer().AddEventHandler(c.handler)
+	c.specsFactory.Specs().V1alpha1().TCPRoutes().Informer().AddEventHandler(c.handler)
 
-		c.splitFactory = splitInformer.NewSharedInformerFactoryWithOptions(c.clients.GetSplitClient(), k8s.ResyncPeriod)
-		c.splitFactory.Split().V1alpha2().TrafficSplits().Informer().AddEventHandler(c.handler)
+	// Create the SMI listers
+	c.TrafficTargetLister = c.accessFactory.Access().V1alpha1().TrafficTargets().Lister()
+	c.HTTPRouteGroupLister = c.specsFactory.Specs().V1alpha1().HTTPRouteGroups().Lister()
+	c.TCPRouteLister = c.specsFactory.Specs().V1alpha1().TCPRoutes().Lister()
+	c.TrafficSplitLister = c.splitFactory.Split().V1alpha2().TrafficSplits().Lister()
 
-		// Create the SMI listers
-		c.TrafficTargetLister = c.accessFactory.Access().V1alpha1().TrafficTargets().Lister()
-		c.HTTPRouteGroupLister = c.specsFactory.Specs().V1alpha1().HTTPRouteGroups().Lister()
-		c.TCPRouteLister = c.specsFactory.Specs().V1alpha1().TCPRoutes().Lister()
-		c.TrafficSplitLister = c.splitFactory.Split().V1alpha2().TrafficSplits().Lister()
+	topologyBuilder := topology.NewBuilder(
+		c.ServiceLister,
+		c.EndpointsLister,
+		c.PodLister,
+		c.TrafficTargetLister,
+		c.TrafficSplitLister,
+		c.HTTPRouteGroupLister,
+		c.TCPRouteLister)
 
-		c.provider = smi.New(c.log, c.defaultMode, c.tcpStateTable, c.ignored, c.ServiceLister, c.EndpointsLister, c.PodLister, c.TrafficTargetLister, c.HTTPRouteGroupLister, c.TCPRouteLister, c.TrafficSplitLister, c.minHTTPPort, c.maxHTTPPort)
-
-		return
-	}
-
-	// If SMI is not configured, use the kubernetes provider.
-	c.provider = kubernetes.New(c.log, c.defaultMode, c.tcpStateTable, c.ignored, c.ServiceLister, c.EndpointsLister, c.minHTTPPort, c.maxHTTPPort)
+	c.provider = provider.New(topologyBuilder, c.tcpStateTable, c.ignored, c.minHTTPPort, c.maxHTTPPort, c.aclEnabled)
 }
 
 // Run is the main entrypoint for the controller.
@@ -266,29 +268,27 @@ func (c *Controller) startInformers(stopCh <-chan struct{}, syncTimeout time.Dur
 		}
 	}
 
-	if c.smiEnabled {
-		c.accessFactory.Start(stopCh)
+	c.accessFactory.Start(stopCh)
 
-		for t, ok := range c.accessFactory.WaitForCacheSync(ctx.Done()) {
-			if !ok {
-				c.log.Errorf("timed out waiting for controller caches to sync: %s", t.String())
-			}
+	for t, ok := range c.accessFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			c.log.Errorf("timed out waiting for controller caches to sync: %s", t.String())
 		}
+	}
 
-		c.specsFactory.Start(stopCh)
+	c.specsFactory.Start(stopCh)
 
-		for t, ok := range c.specsFactory.WaitForCacheSync(ctx.Done()) {
-			if !ok {
-				c.log.Errorf("timed out waiting for controller caches to sync: %s", t.String())
-			}
+	for t, ok := range c.specsFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			c.log.Errorf("timed out waiting for controller caches to sync: %s", t.String())
 		}
+	}
 
-		c.splitFactory.Start(stopCh)
+	c.splitFactory.Start(stopCh)
 
-		for t, ok := range c.splitFactory.WaitForCacheSync(ctx.Done()) {
-			if !ok {
-				c.log.Errorf("timed out waiting for controller caches to sync: %s", t.String())
-			}
+	for t, ok := range c.splitFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			c.log.Errorf("timed out waiting for controller caches to sync: %s", t.String())
 		}
 	}
 }
