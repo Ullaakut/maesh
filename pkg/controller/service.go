@@ -58,6 +58,7 @@ func (s *ShadowServiceManager) Create(userSvc *corev1.Service) error {
 	}
 
 	ports := s.getShadowServicePorts(userSvc)
+
 	svc := &corev1.Service{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      name,
@@ -158,7 +159,7 @@ func (s *ShadowServiceManager) cleanupPortMapping(oldUserSvc *corev1.Service, ne
 				Port:      old.Port,
 			})
 			if err != nil {
-				s.log.Warnf("Unable to remove port mapping for %s/%s on port %d %v", oldUserSvc.Namespace, oldUserSvc.Name, old.Port, err)
+				s.log.Warnf("Unable to remove port mapping for %s/%s on port %d", oldUserSvc.Namespace, oldUserSvc.Name, old.Port)
 			}
 		}
 	}
