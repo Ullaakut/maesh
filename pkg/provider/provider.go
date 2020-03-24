@@ -422,8 +422,11 @@ func buildHTTPRouterRule(tt *topology.ServiceTrafficTarget) string {
 
 	if len(orRules) > 0 {
 		matches := strings.Join(orRules, " || ")
+		if len(orRules) > 1 {
+			matches = fmt.Sprintf("(%s)", matches)
+		}
 
-		return fmt.Sprintf("(%s) && (%s)", hostRule, matches)
+		return fmt.Sprintf("(%s) && %s", hostRule, matches)
 	}
 
 	return hostRule

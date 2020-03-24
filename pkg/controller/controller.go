@@ -10,14 +10,13 @@ import (
 	"reflect"
 	"time"
 
-	"github.com/containous/maesh/pkg/provider"
-	"github.com/containous/maesh/pkg/topology"
-
 	"github.com/cenkalti/backoff/v4"
 	"github.com/containous/maesh/pkg/api"
 	"github.com/containous/maesh/pkg/deploylog"
 	"github.com/containous/maesh/pkg/k8s"
+	"github.com/containous/maesh/pkg/provider"
 	"github.com/containous/maesh/pkg/providers/base"
+	"github.com/containous/maesh/pkg/topology"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	"github.com/containous/traefik/v2/pkg/safe"
 	accessInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
