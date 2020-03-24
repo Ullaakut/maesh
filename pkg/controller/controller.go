@@ -86,7 +86,7 @@ type Controller struct {
 // MeshControllerConfig holds the configuration of the mesh controller.
 type MeshControllerConfig struct {
 	Log              logrus.FieldLogger
-	AclEnabled       bool
+	ACLEnabled       bool
 	DefaultMode      string
 	Namespace        string
 	IgnoreNamespaces []string
@@ -120,7 +120,7 @@ func NewMeshController(clients k8s.Client, cfg MeshControllerConfig) (*Controlle
 		log:           cfg.Log,
 		clients:       clients,
 		ignored:       ignored,
-		aclEnabled:    cfg.AclEnabled,
+		aclEnabled:    cfg.ACLEnabled,
 		defaultMode:   cfg.DefaultMode,
 		meshNamespace: cfg.Namespace,
 		apiPort:       cfg.APIPort,
@@ -182,7 +182,7 @@ func (c *Controller) init() {
 		c.HTTPRouteGroupLister,
 		c.TCPRouteLister)
 
-	c.provider = provider.New(topologyBuilder, c.tcpStateTable, c.ignored, c.minHTTPPort, c.maxHTTPPort, c.aclEnabled)
+	c.provider = provider.New(topologyBuilder, c.tcpStateTable, c.ignored, c.minHTTPPort, c.maxHTTPPort, c.aclEnabled, c.defaultMode)
 }
 
 // Run is the main entrypoint for the controller.
