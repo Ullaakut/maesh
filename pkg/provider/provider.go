@@ -21,23 +21,25 @@ type TCPPortFinder interface {
 }
 
 type Provider struct {
-	acl         bool
-	minHTTPPort int32
-	maxHTTPPort int32
+	acl                bool
+	minHTTPPort        int32
+	maxHTTPPort        int32
+	defaultTrafficType string
 
 	topologyBuilder TopologyBuilder
 	tcpStateTable   TCPPortFinder
 	ignored         k8s.IgnoreWrapper
 }
 
-func New(topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool) *Provider {
+func New(topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool, defaultTrafficType string) *Provider {
 	return &Provider{
-		acl:             acl,
-		minHTTPPort:     minHTTPPort,
-		maxHTTPPort:     maxHTTPPort,
-		topologyBuilder: topologyBuilder,
-		tcpStateTable:   tcpStateTable,
-		ignored:         ignored,
+		acl:                acl,
+		minHTTPPort:        minHTTPPort,
+		maxHTTPPort:        maxHTTPPort,
+		defaultTrafficType: defaultTrafficType,
+		topologyBuilder:    topologyBuilder,
+		tcpStateTable:      tcpStateTable,
+		ignored:            ignored,
 	}
 }
 
@@ -50,7 +52,7 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 	}
 
 	for _, svc := range topology.Services {
-		trafficType, err := getTrafficTypeAnnotation(svc)
+		trafficType, err := p.getTrafficTypeAnnotation(svc)
 		if err != nil {
 			return nil, fmt.Errorf("unable to evaluate traffic-type annotation on service %s/%s: %w", svc.Namespace, svc.Name, err)
 		}
@@ -93,10 +95,10 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 }
 
 func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration, svc *topology.Service, scheme, trafficType string, middlewares []string) error {
-	routerRule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", svc.Name, svc.Namespace, svc.ClusterIP)
-
 	switch trafficType {
 	case k8s.ServiceTypeHTTP:
+		httpRule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", svc.Name, svc.Namespace, svc.ClusterIP)
+
 		for portID, svcPort := range svc.Ports {
 			port := svcPort.TargetPort.IntVal
 
@@ -107,7 +109,7 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 
 			key := getServiceRouterKeyFromService(svc, port)
 			cfg.HTTP.Services[key] = buildHTTPServiceFromService(svc, scheme, port)
-			cfg.HTTP.Routers[key] = buildHTTPRouter(routerRule, entrypoint, middlewares, key)
+			cfg.HTTP.Routers[key] = buildHTTPRouter(httpRule, entrypoint, middlewares, key)
 		}
 
 	case k8s.ServiceTypeTCP:
@@ -180,10 +182,10 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 }
 
 func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configuration, ts *topology.TrafficSplit, scheme, trafficType string, middlewares []string) error {
-	routerRule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", ts.Service.Name, ts.Service.Namespace, ts.Service.ClusterIP)
-
 	switch trafficType {
 	case k8s.ServiceTypeHTTP:
+		httpRule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", ts.Service.Name, ts.Service.Namespace, ts.Service.ClusterIP)
+
 		for portID, svcPort := range ts.Service.Ports {
 			port := svcPort.TargetPort.IntVal
 
@@ -204,9 +206,10 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 			key := getServiceRouterKeyFromTrafficSplit(ts, port)
 			cfg.HTTP.Services[key] = buildHTTPServiceFromTrafficSplit(backendSvcs)
-			cfg.HTTP.Routers[key] = buildHTTPRouter(routerRule, entrypoint, middlewares, key)
+			cfg.HTTP.Routers[key] = buildHTTPRouter(httpRule, entrypoint, middlewares, key)
 		}
 	case k8s.ServiceTypeTCP:
+		tcpRule := buildTCPRouterRule()
 		for _, svcPort := range ts.Service.Ports {
 			port := svcPort.TargetPort.IntVal
 
@@ -227,7 +230,7 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 			key := getServiceRouterKeyFromTrafficSplit(ts, port)
 			cfg.TCP.Services[key] = buildTCPServiceFromTrafficSplit(backendSvcs)
-			cfg.TCP.Routers[key] = buildTCPRouter(routerRule, entrypoint, key)
+			cfg.TCP.Routers[key] = buildTCPRouter(tcpRule, entrypoint, key)
 		}
 
 	default:
@@ -510,11 +513,11 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middle
 	}
 }
 
-func getTrafficTypeAnnotation(svc *topology.Service) (string, error) {
+func (p *Provider) getTrafficTypeAnnotation(svc *topology.Service) (string, error) {
 	trafficType, ok := svc.Annotations[k8s.AnnotationServiceType]
 
 	if !ok {
-		return k8s.ServiceTypeHTTP, nil
+		return p.defaultTrafficType, nil
 	}
 	if trafficType != k8s.ServiceTypeHTTP && trafficType != k8s.ServiceTypeTCP {
 		return "", fmt.Errorf("traffic-type annotation references an unknown traffic type %q", trafficType)
