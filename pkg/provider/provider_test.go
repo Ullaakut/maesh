@@ -126,7 +126,8 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 				},
 			},
 			Services: map[string]*dynamic.Service{
-				"readiness": readinessSvc,
+				"block-all-service": blockAllService,
+				"readiness":         readinessSvc,
 				"my-ns-svc-b-8080": {
 					LoadBalancer: &dynamic.ServersLoadBalancer{
 						Servers: []dynamic.Server{
@@ -178,7 +179,7 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 				},
 			},
 			Middlewares: map[string]*dynamic.Middleware{
-				"block-all-whitelist": blockAllWhitelistMiddleware,
+				"block-all-middleware": blockAllMiddleware,
 				"my-ns-svc-b": {
 					Retry: &dynamic.Retry{Attempts: 2},
 					RateLimit: &dynamic.RateLimit{
@@ -306,10 +307,11 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 				"readiness": readinessRtr,
 			},
 			Services: map[string]*dynamic.Service{
-				"readiness": readinessSvc,
+				"readiness":         readinessSvc,
+				"block-all-service": blockAllService,
 			},
 			Middlewares: map[string]*dynamic.Middleware{
-				"block-all-whitelist": blockAllWhitelistMiddleware,
+				"block-all-middleware": blockAllMiddleware,
 			},
 		},
 		TCP: &dynamic.TCPConfiguration{
@@ -486,30 +488,30 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 				"my-ns-svc-a-9090": {
 					Rule:        "Host(`svc-a.my-ns.maesh`) || Host(`10.10.13.1`)",
 					EntryPoints: []string{"http-10000"},
-					Service:     "my-ns-svc-a-9090",
+					Service:     "block-all-service",
 					Priority:    1,
-					Middlewares: []string{"block-all-whitelist"},
+					Middlewares: []string{"block-all-middleware"},
 				},
 				"my-ns-svc-b-8080": {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
-					Service:     "my-ns-svc-b-8080",
+					Service:     "block-all-service",
 					Priority:    1,
-					Middlewares: []string{"block-all-whitelist"},
+					Middlewares: []string{"block-all-middleware"},
 				},
 				"my-ns-svc-d-8080": {
 					Rule:        "Host(`svc-d.my-ns.maesh`) || Host(`10.10.15.1`)",
 					EntryPoints: []string{"http-10000"},
-					Service:     "my-ns-svc-d-8080",
+					Service:     "block-all-service",
 					Priority:    1,
-					Middlewares: []string{"block-all-whitelist"},
+					Middlewares: []string{"block-all-middleware"},
 				},
 				"my-ns-svc-e-8080": {
 					Rule:        "Host(`svc-e.my-ns.maesh`) || Host(`10.10.16.1`)",
 					EntryPoints: []string{"http-10000"},
-					Service:     "my-ns-svc-e-8080",
+					Service:     "block-all-service",
 					Priority:    1,
-					Middlewares: []string{"block-all-whitelist"},
+					Middlewares: []string{"block-all-middleware"},
 				},
 				"my-ns-svc-b-tt-8080-traffic-target": {
 					Rule:        "(Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)) && ((PathPrefix(`/{path:api}`) && Method(`GET`)) || (PathPrefix(`/{path:metric}`) && Method(`POST`)))",
@@ -527,34 +529,8 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 				},
 			},
 			Services: map[string]*dynamic.Service{
-				"readiness": readinessSvc,
-				"my-ns-svc-a-9090": {
-					LoadBalancer: &dynamic.ServersLoadBalancer{
-						Servers: []dynamic.Server{
-							{URL: "http://10.10.1.1:9090"},
-						},
-						PassHostHeader: getBoolRef(true),
-					},
-				},
-				"my-ns-svc-b-8080": {
-					LoadBalancer: &dynamic.ServersLoadBalancer{
-						Servers: []dynamic.Server{
-							{URL: "http://10.10.2.1:8080"},
-							{URL: "http://10.10.2.2:8080"},
-						},
-						PassHostHeader: getBoolRef(true),
-					},
-				},
-				"my-ns-svc-d-8080": {
-					LoadBalancer: &dynamic.ServersLoadBalancer{
-						PassHostHeader: getBoolRef(true),
-					},
-				},
-				"my-ns-svc-e-8080": {
-					LoadBalancer: &dynamic.ServersLoadBalancer{
-						PassHostHeader: getBoolRef(true),
-					},
-				},
+				"readiness":         readinessSvc,
+				"block-all-service": blockAllService,
 				"my-ns-svc-b-tt-8080-traffic-target": {
 					LoadBalancer: &dynamic.ServersLoadBalancer{
 						Servers: []dynamic.Server{
@@ -596,7 +572,7 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 				},
 			},
 			Middlewares: map[string]*dynamic.Middleware{
-				"block-all-whitelist": blockAllWhitelistMiddleware,
+				"block-all-middleware": blockAllMiddleware,
 				"my-ns-svc-b": {
 					Retry: &dynamic.Retry{Attempts: 2},
 					RateLimit: &dynamic.RateLimit{
@@ -753,8 +729,12 @@ var readinessSvc = &dynamic.Service{
 	},
 }
 
-var blockAllWhitelistMiddleware = &dynamic.Middleware{
+var blockAllMiddleware = &dynamic.Middleware{
 	IPWhiteList: &dynamic.IPWhiteList{
 		SourceRange: []string{"255.255.255.255"},
 	},
+}
+
+var blockAllService = &dynamic.Service{
+	LoadBalancer: &dynamic.ServersLoadBalancer{},
 }
