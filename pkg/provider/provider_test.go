@@ -1,20 +1,25 @@
 package provider_test
 
 import (
+	"context"
+	"fmt"
 	"testing"
+	"time"
 
-	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
-
-	"github.com/containous/maesh/pkg/k8s"
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/provider"
 	"github.com/containous/maesh/pkg/topology"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
+	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/client-go/informers"
+	k8s "k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/fake"
+	corev1 "k8s.io/client-go/listers/core/v1"
 )
 
 type TopologyBuilderMock func() (*topology.Topology, error)
@@ -25,7 +30,7 @@ func (m TopologyBuilderMock) Build(_ mk8s.IgnoreWrapper) (*topology.Topology, er
 
 type tcpStateTableMock func() (int32, bool)
 
-func (t tcpStateTableMock) Find(_ k8s.ServiceWithPort) (int32, bool) {
+func (t tcpStateTableMock) Find(_ mk8s.ServiceWithPort) (int32, bool) {
 	return t()
 }
 
@@ -88,8 +93,13 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 	tcpStatetable := func() (int32, bool) {
 		return 5000, true
 	}
+
+	client := fake.NewSimpleClientset()
+	podLister, err := createPodLister(client)
+	require.NoError(t, err)
+
 	ignored := mk8s.NewIgnored()
-	provider := provider.New(TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, false, "http")
+	provider := provider.New(podLister, TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, false, "http", "maesh")
 
 	got, err := provider.BuildConfig()
 	require.NoError(t, err)
@@ -295,8 +305,12 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 		return 5000, true
 	}
 
+	client := fake.NewSimpleClientset()
+	podLister, err := createPodLister(client)
+	require.NoError(t, err)
+
 	ignored := mk8s.NewIgnored()
-	provider := provider.New(TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, true, "tcp")
+	provider := provider.New(podLister, TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, true, "tcp", "maesh")
 
 	got, err := provider.BuildConfig()
 	require.NoError(t, err)
@@ -475,8 +489,12 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 		return top, nil
 	}
 
+	client := fake.NewSimpleClientset()
+	podLister, err := createPodLister(client)
+	require.NoError(t, err)
+
 	ignored := mk8s.NewIgnored()
-	provider := provider.New(TopologyBuilderMock(builder), nil, ignored, 10000, 10001, true, "http")
+	provider := provider.New(podLister, TopologyBuilderMock(builder), nil, ignored, 10000, 10001, true, "http", "maesh")
 
 	got, err := provider.BuildConfig()
 	require.NoError(t, err)
@@ -588,6 +606,9 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 						SourceRange: []string{
 							"10.10.1.1",
 							"10.10.3.1",
+						},
+						IPStrategy: &dynamic.IPStrategy{
+							ExcludedIPs: []string{},
 						},
 					},
 				},
@@ -710,6 +731,25 @@ func getBoolRef(v bool) *bool {
 
 func getIntRef(v int) *int {
 	return &v
+}
+
+func createPodLister(k8sClient k8s.Interface) (corev1.PodLister, error) {
+	k8sFactory := informers.NewSharedInformerFactoryWithOptions(k8sClient, mk8s.ResyncPeriod)
+
+	podLister := k8sFactory.Core().V1().Pods().Lister()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	k8sFactory.Start(ctx.Done())
+
+	for t, ok := range k8sFactory.WaitForCacheSync(ctx.Done()) {
+		if !ok {
+			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
+		}
+	}
+
+	return podLister, nil
 }
 
 var readinessRtr = &dynamic.Router{

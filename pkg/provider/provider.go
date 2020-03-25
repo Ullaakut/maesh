@@ -10,6 +10,9 @@ import (
 	"github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/topology"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
+	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/selection"
+	v1 "k8s.io/client-go/listers/core/v1"
 )
 
 type TopologyBuilder interface {
@@ -55,18 +58,22 @@ type Provider struct {
 	minHTTPPort        int32
 	maxHTTPPort        int32
 	defaultTrafficType string
+	maeshNamespace     string
 
+	podLister       v1.PodLister
 	topologyBuilder TopologyBuilder
 	tcpStateTable   TCPPortFinder
 	ignored         k8s.IgnoreWrapper
 }
 
-func New(topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool, defaultTrafficType string) *Provider {
+func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool, defaultTrafficType, maeshNamespace string) *Provider {
 	return &Provider{
 		acl:                acl,
 		minHTTPPort:        minHTTPPort,
 		maxHTTPPort:        maxHTTPPort,
 		defaultTrafficType: defaultTrafficType,
+		maeshNamespace:     maeshNamespace,
+		podLister:          podLister,
 		topologyBuilder:    topologyBuilder,
 		tcpStateTable:      tcpStateTable,
 		ignored:            ignored,
@@ -80,6 +87,8 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 	if err != nil {
 		return nil, fmt.Errorf("unable to build topology: %w", err)
 	}
+
+	maeshProxyIPs, err := p.getMaeshProxyIPs()
 
 	for _, svc := range topology.Services {
 		trafficType, err := p.getTrafficTypeAnnotation(svc)
@@ -104,7 +113,7 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 
 		if p.acl {
 			for _, tt := range svc.TrafficTargets {
-				if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares); err != nil {
+				if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares, maeshProxyIPs); err != nil {
 					return nil, fmt.Errorf("unable to build routers and services for service %s/%s and traffic-split %s: %w", svc.Namespace, svc.Name, tt.Name, err)
 				}
 			}
@@ -168,10 +177,10 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 	return nil
 }
 
-func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configuration, tt *topology.ServiceTrafficTarget, scheme, trafficType string, middlewares []string) error {
+func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configuration, tt *topology.ServiceTrafficTarget, scheme, trafficType string, middlewares []string, maeshProxyIPs []string) error {
 	switch trafficType {
 	case k8s.ServiceTypeHTTP:
-		whitelistMiddleware := buildWhitelistMiddleware(tt)
+		whitelistMiddleware := buildWhitelistMiddleware(tt, maeshProxyIPs)
 		if whitelistMiddleware == nil {
 			return nil
 		}
@@ -268,6 +277,26 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 	}
 
 	return nil
+}
+
+func (p *Provider) getMaeshProxyIPs() ([]string, error) {
+	req, err := labels.NewRequirement("component", selection.Equals, []string{"maesh-mesh"})
+	if err != nil {
+		return []string{}, err
+	}
+
+	selector := labels.Everything().Add(*req)
+	pods, err := p.podLister.Pods(p.maeshNamespace).List(selector)
+	if err != nil {
+		return []string{}, fmt.Errorf("unable to get Maesh Proxy pods: %w", err)
+	}
+
+	proxyIPs := make([]string, len(pods))
+	for i, pod := range pods {
+		proxyIPs[i] = pod.Status.PodIP
+	}
+
+	return proxyIPs, nil
 }
 
 func (p *Provider) buildBlockAllRouters(cfg *dynamic.Configuration, svc *topology.Service) error {
@@ -551,7 +580,7 @@ func buildMiddleware(svc *topology.Service) (*dynamic.Middleware, error) {
 	}, nil
 }
 
-func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middleware {
+func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget, excludedIPs []string) *dynamic.Middleware {
 	var IPs []string
 	for _, source := range tt.Sources {
 		for _, pod := range source.Pods {
@@ -566,6 +595,9 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middle
 	return &dynamic.Middleware{
 		IPWhiteList: &dynamic.IPWhiteList{
 			SourceRange: IPs,
+			IPStrategy: &dynamic.IPStrategy{
+				ExcludedIPs: excludedIPs,
+			},
 		},
 	}
 }
