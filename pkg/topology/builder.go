@@ -248,22 +248,23 @@ func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarge
 	return sources
 }
 
-func (b *Builder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.TrafficTarget) ([]int32, error) {
-	var destPorts []int32
+func (b *Builder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.TrafficTarget) ([]v1.ServicePort, error) {
+	if tt.Destination.Port == "" {
+		return svc.Spec.Ports, nil
+	}
 
-	if tt.Destination.Port != "" {
-		port, err := strconv.ParseInt(tt.Destination.Port, 10, 32)
-		if err != nil {
-			return nil, fmt.Errorf("destination port of TrafficTarget %s/%s is not a valid port: %w", tt.Namespace, tt.Name, err)
-		}
-		destPorts = []int32{int32(port)}
-	} else {
-		for _, port := range svc.Spec.Ports {
-			destPorts = append(destPorts, port.TargetPort.IntVal)
+	port, err := strconv.ParseInt(tt.Destination.Port, 10, 32)
+	if err != nil {
+		return nil, fmt.Errorf("destination port of TrafficTarget %s/%s is not a valid port: %w", tt.Namespace, tt.Name, err)
+	}
+
+	for _, svcPort := range svc.Spec.Ports {
+		if svcPort.TargetPort.IntVal == int32(port) {
+			return []v1.ServicePort{svcPort}, nil
 		}
 	}
 
-	return destPorts, nil
+	return nil, fmt.Errorf("destination port %d of TrafficTarget %s/%s is not exposed by the service", port, tt.Namespace, tt.Name)
 }
 
 func (b *Builder) buildTrafficTargetSpecs(topology *Topology, tt *access.TrafficTarget) ([]TrafficSpec, error) {

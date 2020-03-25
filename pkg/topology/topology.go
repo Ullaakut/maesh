@@ -68,7 +68,7 @@ type ServiceTrafficTargetSource struct {
 type ServiceTrafficTargetDestination struct {
 	ServiceAccount string
 	Namespace      string
-	Ports          []int32
+	Ports          []corev1.ServicePort
 	Pods           []*Pod
 }
 

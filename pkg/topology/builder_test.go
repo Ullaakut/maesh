@@ -39,16 +39,19 @@ func TestTopologyBuilder_BuildIgnoresNamespaces(t *testing.T) {
 		"maesh.containo.us/ratelimit-average": "100",
 		"maesh.containo.us/ratelimit-burst":   "200",
 	}
+	svcbPorts := []corev1.ServicePort{svcPort("port-8080", 8080, 8080)}
+	svccPorts := []corev1.ServicePort{svcPort("port-9091", 9091, 9091)}
+	svcdPorts := []corev1.ServicePort{svcPort("port-9092", 9092, 9092)}
 
 	saA := createServiceAccount("ignored-ns", "service-account-a")
 	podA := createPod("ignored-ns", "app-a", saA, selectorAppA, "10.10.1.1")
 
 	saB := createServiceAccount("ignored-ns", "service-account-b")
-	svcB := createService("ignored-ns", "svc-b", annotations, []int32{8080}, selectorAppB, "10.10.1.16")
+	svcB := createService("ignored-ns", "svc-b", annotations, svcbPorts, selectorAppB, "10.10.1.16")
 	podB := createPod("ignored-ns", "app-b", saB, svcB.Spec.Selector, "10.10.2.1")
 
-	svcC := createService("ignored-ns", "svc-c", annotations, []int32{9091}, selectorAppA, "10.10.1.17")
-	svcD := createService("ignored-ns", "svc-d", annotations, []int32{9092}, selectorAppA, "10.10.1.18")
+	svcC := createService("ignored-ns", "svc-c", annotations, svccPorts, selectorAppA, "10.10.1.17")
+	svcD := createService("ignored-ns", "svc-d", annotations, svcdPorts, selectorAppA, "10.10.1.18")
 
 	apiMatch := createHTTPMatch("api", []string{"GET", "POST"}, "/api")
 	metricMatch := createHTTPMatch("metric", []string{"GET"}, "/metric")
@@ -93,16 +96,19 @@ func TestTopologyBuilder_BuildWithTrafficTargetAndTrafficSplit(t *testing.T) {
 		"maesh.containo.us/ratelimit-average": "100",
 		"maesh.containo.us/ratelimit-burst":   "200",
 	}
+	svcbPorts := []corev1.ServicePort{svcPort("port-8080", 8080, 8080)}
+	svccPorts := []corev1.ServicePort{svcPort("port-9091", 9091, 9091)}
+	svcdPorts := []corev1.ServicePort{svcPort("port-9092", 9092, 9092)}
 
 	saA := createServiceAccount("my-ns", "service-account-a")
 	podA := createPod("my-ns", "app-a", saA, selectorAppA, "10.10.1.1")
 
 	saB := createServiceAccount("my-ns", "service-account-b")
-	svcB := createService("my-ns", "svc-b", annotations, []int32{8080}, selectorAppB, "10.10.1.16")
+	svcB := createService("my-ns", "svc-b", annotations, svcbPorts, selectorAppB, "10.10.1.16")
 	podB := createPod("my-ns", "app-b", saB, svcB.Spec.Selector, "10.10.2.1")
 
-	svcC := createService("my-ns", "svc-c", annotations, []int32{9091}, selectorAppA, "10.10.1.17")
-	svcD := createService("my-ns", "svc-d", annotations, []int32{9092}, selectorAppA, "10.10.1.18")
+	svcC := createService("my-ns", "svc-c", annotations, svccPorts, selectorAppA, "10.10.1.17")
+	svcD := createService("my-ns", "svc-d", annotations, svcdPorts, selectorAppA, "10.10.1.18")
 
 	apiMatch := createHTTPMatch("api", []string{"GET", "POST"}, "/api")
 	metricMatch := createHTTPMatch("metric", []string{"GET"}, "/metric")
@@ -144,7 +150,7 @@ func TestTopologyBuilder_BuildWithTrafficTargetAndTrafficSplit(t *testing.T) {
 		Destination: topology.ServiceTrafficTargetDestination{
 			ServiceAccount: saB.Name,
 			Namespace:      saB.Namespace,
-			Ports:          []int32{8080},
+			Ports:          []corev1.ServicePort{svcPort("port-8080", 8080, 8080)},
 			Pods:           []*topology.Pod{wantPodB1},
 		},
 		Specs: []topology.TrafficSpec{
@@ -207,12 +213,13 @@ func TestTopologyBuilder_BuildWithTrafficTargetSpecEmptyMatch(t *testing.T) {
 	selectorAppA := map[string]string{"app": "app-a"}
 	selectorAppB := map[string]string{"app": "app-b"}
 	annotations := map[string]string{}
+	svcbPorts := []corev1.ServicePort{svcPort("port-8080", 8080, 8080)}
 
 	saA := createServiceAccount("my-ns", "service-account-a")
 	podA := createPod("my-ns", "app-a", saA, selectorAppA, "10.10.1.1")
 
 	saB := createServiceAccount("my-ns", "service-account-b")
-	svcB := createService("my-ns", "svc-b", annotations, []int32{8080}, selectorAppB, "10.10.1.16")
+	svcB := createService("my-ns", "svc-b", annotations, svcbPorts, selectorAppB, "10.10.1.16")
 	podB := createPod("my-ns", "app-b", saB, svcB.Spec.Selector, "10.10.2.1")
 
 	apiMatch := createHTTPMatch("api", []string{"GET", "POST"}, "/api")
@@ -251,7 +258,7 @@ func TestTopologyBuilder_BuildWithTrafficTargetSpecEmptyMatch(t *testing.T) {
 		Destination: topology.ServiceTrafficTargetDestination{
 			ServiceAccount: saB.Name,
 			Namespace:      saB.Namespace,
-			Ports:          []int32{8080},
+			Ports:          []corev1.ServicePort{svcPort("port-8080", 8080, 8080)},
 			Pods:           []*topology.Pod{wantPodB1},
 		},
 		Specs: []topology.TrafficSpec{
@@ -298,12 +305,16 @@ func TestTopologyBuilder_BuildWithTrafficTargetEmptyDestinationPort(t *testing.T
 		"maesh.containo.us/ratelimit-average": "100",
 		"maesh.containo.us/ratelimit-burst":   "200",
 	}
+	svcbPorts := []corev1.ServicePort{
+		svcPort("port-8080", 8080, 8080),
+		svcPort("port-9090", 9090, 9090),
+	}
 
 	saA := createServiceAccount("my-ns", "service-account-a")
 	podA := createPod("my-ns", "app-a", saA, selectorAppA, "10.10.1.1")
 
 	saB := createServiceAccount("my-ns", "service-account-b")
-	svcB := createService("my-ns", "svc-b", annotations, []int32{8080, 9090}, selectorAppB, "10.10.1.16")
+	svcB := createService("my-ns", "svc-b", annotations, svcbPorts, selectorAppB, "10.10.1.16")
 	podB := createPod("my-ns", "app-b", saB, svcB.Spec.Selector, "10.10.2.1")
 
 	tt := createTrafficTarget("my-ns", "tt", saB, "", []*corev1.ServiceAccount{saA}, nil, []string{})
@@ -338,8 +349,11 @@ func TestTopologyBuilder_BuildWithTrafficTargetEmptyDestinationPort(t *testing.T
 		Destination: topology.ServiceTrafficTargetDestination{
 			ServiceAccount: saB.Name,
 			Namespace:      saB.Namespace,
-			Ports:          []int32{8080, 9090},
-			Pods:           []*topology.Pod{wantPodB1},
+			Ports: []corev1.ServicePort{
+				svcPort("port-8080", 8080, 8080),
+				svcPort("port-9090", 9090, 9090),
+			},
+			Pods: []*topology.Pod{wantPodB1},
 		},
 	}
 
@@ -373,6 +387,7 @@ func TestTopologyBuilder_BuildTrafficTargetMultipleSourcesAndDestinations(t *tes
 	selectorAppB := map[string]string{"app": "app-b"}
 	selectorAppC := map[string]string{"app": "app-c"}
 	annotations := map[string]string{}
+	svccPorts := []corev1.ServicePort{svcPort("port-8080", 8080, 8080)}
 
 	saA := createServiceAccount("my-ns", "service-account-a")
 	podA := createPod("my-ns", "app-a", saA, selectorAppA, "10.10.1.1")
@@ -381,7 +396,7 @@ func TestTopologyBuilder_BuildTrafficTargetMultipleSourcesAndDestinations(t *tes
 	podB := createPod("my-ns", "app-b", saB, selectorAppB, "10.10.2.1")
 
 	saC := createServiceAccount("my-ns", "service-account-c")
-	svcC := createService("my-ns", "svc-c", annotations, []int32{8080}, selectorAppC, "10.10.1.16")
+	svcC := createService("my-ns", "svc-c", annotations, svccPorts, selectorAppC, "10.10.1.16")
 	podC1 := createPod("my-ns", "app-c-1", saC, svcC.Spec.Selector, "10.10.3.1")
 	podC2 := createPod("my-ns", "app-c-2", saC, svcC.Spec.Selector, "10.10.3.2")
 
@@ -424,7 +439,7 @@ func TestTopologyBuilder_BuildTrafficTargetMultipleSourcesAndDestinations(t *tes
 		Destination: topology.ServiceTrafficTargetDestination{
 			ServiceAccount: saC.Name,
 			Namespace:      saC.Namespace,
-			Ports:          []int32{8080},
+			Ports:          []corev1.ServicePort{svcPort("port-8080", 8080, 8080)},
 			Pods:           []*topology.Pod{wantPodC1, wantPodC2},
 		},
 	}
@@ -547,6 +562,15 @@ func nn(name, ns string) topology.NameNamespace {
 	}
 }
 
+func svcPort(name string, port, targetPort int32) corev1.ServicePort {
+	return corev1.ServicePort{
+		Name:       name,
+		Protocol:   "TCP",
+		Port:       port,
+		TargetPort: intstr.FromInt(int(targetPort)),
+	}
+}
+
 func createTrafficSplit(ns, name string, svc *corev1.Service, backend1 *corev1.Service, weight1 int, backend2 *corev1.Service, weight2 int) *split.TrafficSplit {
 	return &split.TrafficSplit{
 		TypeMeta: metav1.TypeMeta{
@@ -638,19 +662,9 @@ func createHTTPMatch(name string, methods []string, pathPrefix string) spec.HTTP
 func createService(
 	ns, name string,
 	annotations map[string]string,
-	targetPorts []int32,
+	targetPorts []corev1.ServicePort,
 	selector map[string]string,
 	clusterIP string) *corev1.Service {
-
-	ports := make([]corev1.ServicePort, len(targetPorts))
-	for i, p := range targetPorts {
-		ports[i] = corev1.ServicePort{
-			Name:       "",
-			Protocol:   "TCP",
-			Port:       p + 1,
-			TargetPort: intstr.FromInt(int(p)),
-		}
-	}
 
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
@@ -663,7 +677,7 @@ func createService(
 			Annotations: annotations,
 		},
 		Spec: corev1.ServiceSpec{
-			Ports:     ports,
+			Ports:     targetPorts,
 			Selector:  selector,
 			ClusterIP: clusterIP,
 			Type:      "ClusterIP",

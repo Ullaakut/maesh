@@ -20,6 +20,34 @@ type TCPPortFinder interface {
 	Find(svc k8s.ServiceWithPort) (int32, bool)
 }
 
+// TODO:
+// - Bug when changing target port. the provider returns an error because the tcpportmapping doesn't exist for the given port.
+//   Maybe the shadow service mgr didn't passed on it?
+// - Services without TT should still create routes with empty whitlist
+
+// ISSUES:
+// - When querying a service with a traffic-split, if it doesn't have any backend with TT, it waits and return GatewayTimeout...
+
+// TBT:
+// - Create 2 TrafficTarget, with different sources pointing on the same service. That might be a huge limitation! Existing limitation!
+
+// When multiple Traefik Routers listen to the same entrypoint and have the same Rule, the chosen router will be the one
+// with the highest priority. There are few cases where this priority is crucial when building the dynamic configuration:
+// - When a TrafficSplit is set on a k8s service, this will create 2 Traefik Routers. One for accessing the k8s service
+//   endpoints and one for accessing the services endpoints mentionned in the TrafficSplit. They both have the same Rule
+//   but we should always prioritize the TrafficSplit. Therefore, TrafficSplit Routers should always have a higher priority.
+// - When a TrafficTarget Destination targets pods of a k8s service and a TrafficSplit is set on this service. This
+//   will create 2 Traefik Routers. One for the TrafficSplit and one for the TrafficTarget. We should always prioritize
+//   TrafficSplits Routers and so, TrafficSplit Routers should always have a higher priority than TrafficTarget Routers.
+// TODO: What about TCP Router priority? There's no Priority field on TCP Routers
+const (
+	servicePriority       = 1
+	trafficTargetPriority = 2
+	trafficSplitPriority  = 3
+)
+
+const blockAllMiddlewareKey = "block-all-whitelist"
+
 type Provider struct {
 	acl                bool
 	minHTTPPort        int32
@@ -51,6 +79,8 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 		return nil, fmt.Errorf("unable to build topology: %w", err)
 	}
 
+	cfg.HTTP.Middlewares[blockAllMiddlewareKey] = buildBlockAllMiddleware()
+
 	for _, svc := range topology.Services {
 		trafficType, err := p.getTrafficTypeAnnotation(svc)
 		if err != nil {
@@ -62,73 +92,91 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 		}
 
 		var middlewares []string
-		middlewareKey := getMiddlewareKey(svc)
 		middleware, err := buildMiddleware(svc)
 		if err != nil {
 			return nil, fmt.Errorf("unable to build middlewares for service %s/%s: %w", svc.Namespace, svc.Name, err)
 		}
 		if middleware != nil {
+			middlewareKey := getMiddlewareKey(svc)
 			cfg.HTTP.Middlewares[middlewareKey] = middleware
 			middlewares = append(middlewares, middlewareKey)
 		}
 
+		// Create a router and a service for each TrafficSplit attached on the k8s service.
+		for _, ts := range svc.TrafficSplits {
+			if err := p.buildServiceAndRoutersForTrafficSplits(cfg, ts, scheme, trafficType, middlewares); err != nil {
+				return nil, fmt.Errorf("unable to build routers and services for service %s/%s and traffic-split %s: %w", svc.Namespace, svc.Name, ts.Name, err)
+			}
+		}
+
+		// If ACL is true, interpret TrafficTarget and create a router and a service for each of them.
 		if p.acl {
 			for _, tt := range svc.TrafficTargets {
 				if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares); err != nil {
 					return nil, fmt.Errorf("unable to build routers and services for service %s/%s and traffic-split %s: %w", svc.Namespace, svc.Name, tt.Name, err)
 				}
 			}
-		} else {
-			if err := p.buildServicesAndRoutersForService(cfg, svc, scheme, trafficType, middlewares); err != nil {
-				return nil, fmt.Errorf("unable to build routers and services for service %s/%s: %w", svc.Namespace, svc.Name, err)
-			}
 		}
 
-		for _, ts := range svc.TrafficSplits {
-			if err := p.buildServiceAndRoutersForTrafficSplits(cfg, ts, scheme, trafficType, middlewares); err != nil {
-				return nil, fmt.Errorf("unable to build routers and services for service %s/%s and traffic-split %s: %w", svc.Namespace, svc.Name, ts.Name, err)
+		switch trafficType {
+		case k8s.ServiceTypeHTTP:
+			// When ACL is true, we want to make sure we block all traffic not explicitly allowed by a TrafficTarget.
+			// In the meantime, to ensure correct status code, we must provide a router and a service for every
+			// k8s services.
+			if p.acl {
+				middlewares = []string{blockAllMiddlewareKey}
 			}
+
+			if err := p.buildServicesAndRoutersForHTTPService(cfg, svc, scheme, middlewares); err != nil {
+				return nil, fmt.Errorf("unable to build routers and services for HTTP service %s/%s: %w", svc.Namespace, svc.Name, err)
+			}
+		case k8s.ServiceTypeTCP:
+			// As there's no middleware supported on TCP, we can't whitelist sources. The best we can do for now is to
+			// not create routers and services if there's no TrafficTarget or TrafficSplit defined for this service.
+			if p.acl {
+				continue
+			}
+
+			if err := p.buildServicesAndRoutersForTCPService(cfg, svc); err != nil {
+				return nil, fmt.Errorf("unable to build routers and services for TCP service %s/%s: %w", svc.Namespace, svc.Name, err)
+			}
+		default:
+			return nil, fmt.Errorf("unknown traffic-type %q for service %s/%s", trafficType, svc.Namespace, svc.Name)
 		}
 	}
 
 	return cfg, nil
 }
 
-func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration, svc *topology.Service, scheme, trafficType string, middlewares []string) error {
-	switch trafficType {
-	case k8s.ServiceTypeHTTP:
-		httpRule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", svc.Name, svc.Namespace, svc.ClusterIP)
+func (p *Provider) buildServicesAndRoutersForHTTPService(cfg *dynamic.Configuration, svc *topology.Service, scheme string, middlewares []string) error {
+	httpRule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", svc.Name, svc.Namespace, svc.ClusterIP)
 
-		for portID, svcPort := range svc.Ports {
-			port := svcPort.TargetPort.IntVal
-
-			entrypoint, err := p.buildHTTPEntrypoint(portID)
-			if err != nil {
-				return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", svc.Namespace, svc.Name, portID, err)
-			}
-
-			key := getServiceRouterKeyFromService(svc, port)
-			cfg.HTTP.Services[key] = buildHTTPServiceFromService(svc, scheme, port)
-			cfg.HTTP.Routers[key] = buildHTTPRouter(httpRule, entrypoint, middlewares, key)
+	for portID, svcPort := range svc.Ports {
+		entrypoint, err := p.buildHTTPEntrypoint(portID)
+		if err != nil {
+			return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", svc.Namespace, svc.Name, portID, err)
 		}
 
-	case k8s.ServiceTypeTCP:
-		rule := buildTCPRouterRule()
+		key := getServiceRouterKeyFromService(svc, svcPort.Port)
+		cfg.HTTP.Services[key] = buildHTTPServiceFromService(svc, scheme, svcPort.TargetPort.IntVal)
+		cfg.HTTP.Routers[key] = buildHTTPRouter(httpRule, entrypoint, middlewares, key, servicePriority)
+	}
 
-		for _, svcPort := range svc.Ports {
-			port := svcPort.TargetPort.IntVal
+	return nil
+}
 
-			entrypoint, err := p.buildTCPEntrypoint(svc, port)
-			if err != nil {
-				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", svc.Namespace, svc.Name, port, err)
-			}
+func (p *Provider) buildServicesAndRoutersForTCPService(cfg *dynamic.Configuration, svc *topology.Service) error {
+	rule := buildTCPRouterRule()
 
-			key := getServiceRouterKeyFromService(svc, port)
-			cfg.TCP.Services[key] = buildTCPServiceFromService(svc, port)
-			cfg.TCP.Routers[key] = buildTCPRouter(rule, entrypoint, key)
+	for _, svcPort := range svc.Ports {
+		entrypoint, err := p.buildTCPEntrypoint(svc, svcPort.Port)
+		if err != nil {
+			return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", svc.Namespace, svc.Name, svcPort.Port, err)
 		}
-	default:
-		return fmt.Errorf("unknown traffic-type %q for service %s/%s", trafficType, svc.Namespace, svc.Name)
+
+		key := getServiceRouterKeyFromService(svc, svcPort.Port)
+		cfg.TCP.Services[key] = buildTCPServiceFromService(svc, svcPort.TargetPort.IntVal)
+		cfg.TCP.Routers[key] = buildTCPRouter(rule, entrypoint, key)
 	}
 
 	return nil
@@ -147,15 +195,15 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 
 		rule := buildHTTPRouterRule(tt)
 
-		for portID, port := range tt.Destination.Ports {
+		for portID, svcPort := range tt.Destination.Ports {
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
 				return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", tt.Service.Namespace, tt.Service.Name, portID, err)
 			}
 
-			key := getServiceRouterKeyFromTrafficTarget(tt, port)
-			cfg.HTTP.Services[key] = buildHTTPServiceFromTrafficTarget(tt, scheme, port)
-			cfg.HTTP.Routers[key] = buildHTTPRouter(rule, entrypoint, middlewares, key)
+			key := getServiceRouterKeyFromTrafficTarget(tt, svcPort.Port)
+			cfg.HTTP.Services[key] = buildHTTPServiceFromTrafficTarget(tt, scheme, svcPort.TargetPort.IntVal)
+			cfg.HTTP.Routers[key] = buildHTTPRouter(rule, entrypoint, middlewares, key, trafficTargetPriority)
 		}
 	case k8s.ServiceTypeTCP:
 		if !hasTrafficTargetSpecTCPRoute(tt) {
@@ -164,14 +212,14 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 
 		rule := buildTCPRouterRule()
 
-		for _, port := range tt.Destination.Ports {
-			entrypoint, err := p.buildTCPEntrypoint(tt.Service, port)
+		for _, svcPort := range tt.Destination.Ports {
+			entrypoint, err := p.buildTCPEntrypoint(tt.Service, svcPort.Port)
 			if err != nil {
-				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", tt.Service.Namespace, tt.Service.Name, port, err)
+				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", tt.Service.Namespace, tt.Service.Name, svcPort.Port, err)
 			}
 
-			key := getServiceRouterKeyFromTrafficTarget(tt, port)
-			cfg.TCP.Services[key] = buildTCPServiceFromTrafficTarget(tt, port)
+			key := getServiceRouterKeyFromTrafficTarget(tt, svcPort.Port)
+			cfg.TCP.Services[key] = buildTCPServiceFromTrafficTarget(tt, svcPort.TargetPort.IntVal)
 			cfg.TCP.Routers[key] = buildTCPRouter(rule, entrypoint, key)
 		}
 	default:
@@ -187,12 +235,10 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 		httpRule := fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", ts.Service.Name, ts.Service.Namespace, ts.Service.ClusterIP)
 
 		for portID, svcPort := range ts.Service.Ports {
-			port := svcPort.TargetPort.IntVal
-
 			backendSvcs := make([]dynamic.WRRService, len(ts.Backends))
 			for i, backend := range ts.Backends {
-				key := getServiceRouterKeyFromTrafficSplitBackend(ts, port, backend)
-				cfg.HTTP.Services[key] = buildHTTPSplitTrafficBackendService(backend, scheme, port)
+				key := getServiceRouterKeyFromTrafficSplitBackend(ts, svcPort.Port, backend)
+				cfg.HTTP.Services[key] = buildHTTPSplitTrafficBackendService(backend, scheme, svcPort.TargetPort.IntVal)
 				backendSvcs[i] = dynamic.WRRService{
 					Name:   key,
 					Weight: getIntRef(backend.Weight),
@@ -204,31 +250,29 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 				return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", ts.Service.Namespace, ts.Service.Name, portID, err)
 			}
 
-			key := getServiceRouterKeyFromTrafficSplit(ts, port)
+			key := getServiceRouterKeyFromTrafficSplit(ts, svcPort.Port)
 			cfg.HTTP.Services[key] = buildHTTPServiceFromTrafficSplit(backendSvcs)
-			cfg.HTTP.Routers[key] = buildHTTPRouter(httpRule, entrypoint, middlewares, key)
+			cfg.HTTP.Routers[key] = buildHTTPRouter(httpRule, entrypoint, middlewares, key, trafficSplitPriority)
 		}
 	case k8s.ServiceTypeTCP:
 		tcpRule := buildTCPRouterRule()
 		for _, svcPort := range ts.Service.Ports {
-			port := svcPort.TargetPort.IntVal
-
 			backendSvcs := make([]dynamic.TCPWRRService, len(ts.Backends))
 			for i, backend := range ts.Backends {
-				key := getServiceRouterKeyFromTrafficSplitBackend(ts, port, backend)
-				cfg.TCP.Services[key] = buildTCPSplitTrafficBackendService(backend, port)
+				key := getServiceRouterKeyFromTrafficSplitBackend(ts, svcPort.Port, backend)
+				cfg.TCP.Services[key] = buildTCPSplitTrafficBackendService(backend, svcPort.TargetPort.IntVal)
 				backendSvcs[i] = dynamic.TCPWRRService{
 					Name:   key,
 					Weight: getIntRef(backend.Weight),
 				}
 			}
 
-			entrypoint, err := p.buildTCPEntrypoint(ts.Service, port)
+			entrypoint, err := p.buildTCPEntrypoint(ts.Service, svcPort.Port)
 			if err != nil {
-				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", ts.Service.Namespace, ts.Service.Name, port, err)
+				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", ts.Service.Namespace, ts.Service.Name, svcPort.Port, err)
 			}
 
-			key := getServiceRouterKeyFromTrafficSplit(ts, port)
+			key := getServiceRouterKeyFromTrafficSplit(ts, svcPort.Port)
 			cfg.TCP.Services[key] = buildTCPServiceFromTrafficSplit(backendSvcs)
 			cfg.TCP.Routers[key] = buildTCPRouter(tcpRule, entrypoint, key)
 		}
@@ -358,7 +402,7 @@ func buildHTTPSplitTrafficBackendService(backend topology.TrafficSplitBackend, s
 	return &dynamic.Service{
 		LoadBalancer: &dynamic.ServersLoadBalancer{
 			Servers:        []dynamic.Server{server},
-			PassHostHeader: getBoolRef(true),
+			PassHostHeader: getBoolRef(false),
 		},
 	}
 }
@@ -375,12 +419,13 @@ func buildTCPSplitTrafficBackendService(backend topology.TrafficSplitBackend, po
 	}
 }
 
-func buildHTTPRouter(routerRule string, entrypoint string, middlewares []string, svcKey string) *dynamic.Router {
+func buildHTTPRouter(routerRule string, entrypoint string, middlewares []string, svcKey string, priority int) *dynamic.Router {
 	return &dynamic.Router{
 		EntryPoints: []string{entrypoint},
 		Middlewares: middlewares,
 		Service:     svcKey,
 		Rule:        routerRule,
+		Priority:    priority,
 	}
 }
 
@@ -509,6 +554,14 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middle
 	return &dynamic.Middleware{
 		IPWhiteList: &dynamic.IPWhiteList{
 			SourceRange: IPs,
+		},
+	}
+}
+
+func buildBlockAllMiddleware() *dynamic.Middleware {
+	return &dynamic.Middleware{
+		IPWhiteList: &dynamic.IPWhiteList{
+			SourceRange: []string{"255.255.255.255"},
 		},
 	}
 }

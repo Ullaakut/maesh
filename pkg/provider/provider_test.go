@@ -1,7 +1,6 @@
 package provider_test
 
 import (
-	"fmt"
 	"testing"
 
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
@@ -42,14 +41,15 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 	svcfAnnotations := map[string]string{
 		"maesh.containo.us/traffic-type": "tcp",
 	}
+	ports := []v1.ServicePort{svcPort("port-8080", 8080, 8080)}
 	saB := "sa-b"
 
 	podB1 := createPod("my-ns", "pod-b1", saB, "10.10.2.1")
 	podB2 := createPod("my-ns", "pod-b2", saB, "10.10.2.2")
-	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, []int32{8080}, "10.10.14.1", []*topology.Pod{podB1, podB2})
-	svcD := createSvc("my-ns", "svc-d", annotations, []int32{8080}, "10.10.15.1", []*topology.Pod{})
-	svcE := createSvc("my-ns", "svc-e", annotations, []int32{8080}, "10.10.16.1", []*topology.Pod{})
-	svcF := createSvc("my-ns", "svc-f", svcfAnnotations, []int32{8080}, "10.10.17.1", []*topology.Pod{podB1, podB2})
+	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, ports, "10.10.14.1", []*topology.Pod{podB1, podB2})
+	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.15.1", []*topology.Pod{})
+	svcE := createSvc("my-ns", "svc-e", annotations, ports, "10.10.16.1", []*topology.Pod{})
+	svcF := createSvc("my-ns", "svc-f", svcfAnnotations, ports, "10.10.17.1", []*topology.Pod{podB1, podB2})
 
 	ts := &topology.TrafficSplit{
 		Name:      "ts",
@@ -102,22 +102,26 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-8080",
+					Priority:    1,
 					Middlewares: []string{"my-ns-svc-b"},
 				},
 				"my-ns-svc-b-ts-8080-traffic-split": {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-ts-8080-traffic-split",
+					Priority:    3,
 					Middlewares: []string{"my-ns-svc-b"},
 				},
 				"my-ns-svc-d-8080": {
 					Rule:        "Host(`svc-d.my-ns.maesh`) || Host(`10.10.15.1`)",
 					EntryPoints: []string{"http-10000"},
+					Priority:    1,
 					Service:     "my-ns-svc-d-8080",
 				},
 				"my-ns-svc-e-8080": {
 					Rule:        "Host(`svc-e.my-ns.maesh`) || Host(`10.10.16.1`)",
 					EntryPoints: []string{"http-10000"},
+					Priority:    1,
 					Service:     "my-ns-svc-e-8080",
 				},
 			},
@@ -151,7 +155,7 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 						Servers: []dynamic.Server{
 							{URL: "https://svc-d.my-ns.maesh:8080"},
 						},
-						PassHostHeader: getBoolRef(true),
+						PassHostHeader: getBoolRef(false),
 					},
 				},
 				"my-ns-svc-b-ts-8080-svc-e-traffic-split-backend": {
@@ -159,7 +163,7 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 						Servers: []dynamic.Server{
 							{URL: "https://svc-e.my-ns.maesh:8080"},
 						},
-						PassHostHeader: getBoolRef(true),
+						PassHostHeader: getBoolRef(false),
 					},
 				},
 				"my-ns-svc-d-8080": {
@@ -174,6 +178,7 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 				},
 			},
 			Middlewares: map[string]*dynamic.Middleware{
+				"block-all-whitelist": blockAllWhitelistMiddleware,
 				"my-ns-svc-b": {
 					Retry: &dynamic.Retry{Attempts: 2},
 					RateLimit: &dynamic.RateLimit{
@@ -217,12 +222,14 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 func TestProvider_BuildConfigTCP(t *testing.T) {
 	saA := "sa-a"
 	saB := "sa-b"
+	ports := []v1.ServicePort{svcPort("port-8080", 8080, 8080)}
+	annotations := map[string]string{}
 
 	podA := createPod("my-ns", "pod-a", saA, "10.10.1.1")
 	podB := createPod("my-ns", "pod-b", saB, "10.10.1.2")
-	svcB := createSvc("my-ns", "svc-b", map[string]string{}, []int32{8080}, "10.10.13.1", []*topology.Pod{podB})
-	svcC := createSvc("my-ns", "svc-c", map[string]string{}, []int32{8080}, "10.10.13.2", []*topology.Pod{})
-	svcD := createSvc("my-ns", "svc-d", map[string]string{}, []int32{8080}, "10.10.13.3", []*topology.Pod{})
+	svcB := createSvc("my-ns", "svc-b", annotations, ports, "10.10.13.1", []*topology.Pod{podB})
+	svcC := createSvc("my-ns", "svc-c", annotations, ports, "10.10.13.2", []*topology.Pod{})
+	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.13.3", []*topology.Pod{})
 
 	tt := &topology.ServiceTrafficTarget{
 		Service: svcB,
@@ -237,7 +244,7 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 		Destination: topology.ServiceTrafficTargetDestination{
 			ServiceAccount: saB,
 			Namespace:      "my-ns",
-			Ports:          []int32{8080},
+			Ports:          []v1.ServicePort{svcPort("port-8080", 8080, 8080)},
 			Pods:           []*topology.Pod{podB},
 		},
 		Specs: []topology.TrafficSpec{
@@ -301,7 +308,9 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 			Services: map[string]*dynamic.Service{
 				"readiness": readinessSvc,
 			},
-			Middlewares: map[string]*dynamic.Middleware{},
+			Middlewares: map[string]*dynamic.Middleware{
+				"block-all-whitelist": blockAllWhitelistMiddleware,
+			},
 		},
 		TCP: &dynamic.TCPConfiguration{
 			Routers: map[string]*dynamic.TCPRouter{
@@ -365,7 +374,7 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 	assert.Equal(t, want, got)
 }
 
-func TestProvider_BuildConfig(t *testing.T) {
+func TestProvider_BuildConfigHTTP(t *testing.T) {
 	annotations := map[string]string{}
 	svcbAnnotations := map[string]string{
 		"maesh.containo.us/retry-attempts":             "2",
@@ -373,18 +382,20 @@ func TestProvider_BuildConfig(t *testing.T) {
 		"maesh.containo.us/ratelimit-burst":            "110",
 		"maesh.containo.us/circuit-breaker-expression": "LatencyAtQuantileMS(50.0) > 100",
 	}
+	svcaPorts := []v1.ServicePort{svcPort("port-9090", 9090, 9090)}
+	ports := []v1.ServicePort{svcPort("port-8080", 8080, 8080)}
 	saA := "sa-a"
 	saB := "sa-b"
 	saC := "sa-c"
 
 	podA := createPod("my-ns", "pod-a", saA, "10.10.1.1")
-	svcA := createSvc("my-ns", "svc-a", annotations, []int32{9090}, "10.10.13.1", []*topology.Pod{podA})
+	svcA := createSvc("my-ns", "svc-a", annotations, svcaPorts, "10.10.13.1", []*topology.Pod{podA})
 	podC := createPod("my-ns", "pod-c", saC, "10.10.3.1")
 	podB1 := createPod("my-ns", "pod-b1", saB, "10.10.2.1")
 	podB2 := createPod("my-ns", "pod-b2", saB, "10.10.2.2")
-	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, []int32{8080}, "10.10.14.1", []*topology.Pod{podB1, podB2})
-	svcD := createSvc("my-ns", "svc-d", annotations, []int32{8080}, "10.10.15.1", []*topology.Pod{})
-	svcE := createSvc("my-ns", "svc-e", annotations, []int32{8080}, "10.10.16.1", []*topology.Pod{})
+	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, ports, "10.10.14.1", []*topology.Pod{podB1, podB2})
+	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.15.1", []*topology.Pod{})
+	svcE := createSvc("my-ns", "svc-e", annotations, ports, "10.10.16.1", []*topology.Pod{})
 
 	apiMatch := createHTTPMatch("api", []string{"GET"}, "/api")
 	metricMatch := createHTTPMatch("metric", []string{"POST"}, "/metric")
@@ -408,7 +419,7 @@ func TestProvider_BuildConfig(t *testing.T) {
 		Destination: topology.ServiceTrafficTargetDestination{
 			ServiceAccount: saB,
 			Namespace:      "my-ns",
-			Ports:          []int32{8080},
+			Ports:          []v1.ServicePort{svcPort("port-8080", 8080, 8080)},
 			Pods:           []*topology.Pod{podB1, podB2},
 		},
 		Specs: []topology.TrafficSpec{
@@ -472,21 +483,78 @@ func TestProvider_BuildConfig(t *testing.T) {
 		HTTP: &dynamic.HTTPConfiguration{
 			Routers: map[string]*dynamic.Router{
 				"readiness": readinessRtr,
+				"my-ns-svc-a-9090": {
+					Rule:        "Host(`svc-a.my-ns.maesh`) || Host(`10.10.13.1`)",
+					EntryPoints: []string{"http-10000"},
+					Service:     "my-ns-svc-a-9090",
+					Priority:    1,
+					Middlewares: []string{"block-all-whitelist"},
+				},
+				"my-ns-svc-b-8080": {
+					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
+					EntryPoints: []string{"http-10000"},
+					Service:     "my-ns-svc-b-8080",
+					Priority:    1,
+					Middlewares: []string{"block-all-whitelist"},
+				},
+				"my-ns-svc-d-8080": {
+					Rule:        "Host(`svc-d.my-ns.maesh`) || Host(`10.10.15.1`)",
+					EntryPoints: []string{"http-10000"},
+					Service:     "my-ns-svc-d-8080",
+					Priority:    1,
+					Middlewares: []string{"block-all-whitelist"},
+				},
+				"my-ns-svc-e-8080": {
+					Rule:        "Host(`svc-e.my-ns.maesh`) || Host(`10.10.16.1`)",
+					EntryPoints: []string{"http-10000"},
+					Service:     "my-ns-svc-e-8080",
+					Priority:    1,
+					Middlewares: []string{"block-all-whitelist"},
+				},
 				"my-ns-svc-b-tt-8080-traffic-target": {
 					Rule:        "(Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)) && ((PathPrefix(`/{path:api}`) && Method(`GET`)) || (PathPrefix(`/{path:metric}`) && Method(`POST`)))",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-tt-8080-traffic-target",
+					Priority:    2,
 					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist"},
 				},
 				"my-ns-svc-b-ts-8080-traffic-split": {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-ts-8080-traffic-split",
+					Priority:    3,
 					Middlewares: []string{"my-ns-svc-b"},
 				},
 			},
 			Services: map[string]*dynamic.Service{
 				"readiness": readinessSvc,
+				"my-ns-svc-a-9090": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers: []dynamic.Server{
+							{URL: "http://10.10.1.1:9090"},
+						},
+						PassHostHeader: getBoolRef(true),
+					},
+				},
+				"my-ns-svc-b-8080": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						Servers: []dynamic.Server{
+							{URL: "http://10.10.2.1:8080"},
+							{URL: "http://10.10.2.2:8080"},
+						},
+						PassHostHeader: getBoolRef(true),
+					},
+				},
+				"my-ns-svc-d-8080": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						PassHostHeader: getBoolRef(true),
+					},
+				},
+				"my-ns-svc-e-8080": {
+					LoadBalancer: &dynamic.ServersLoadBalancer{
+						PassHostHeader: getBoolRef(true),
+					},
+				},
 				"my-ns-svc-b-tt-8080-traffic-target": {
 					LoadBalancer: &dynamic.ServersLoadBalancer{
 						Servers: []dynamic.Server{
@@ -515,7 +583,7 @@ func TestProvider_BuildConfig(t *testing.T) {
 						Servers: []dynamic.Server{
 							{URL: "http://svc-d.my-ns.maesh:8080"},
 						},
-						PassHostHeader: getBoolRef(true),
+						PassHostHeader: getBoolRef(false),
 					},
 				},
 				"my-ns-svc-b-ts-8080-svc-e-traffic-split-backend": {
@@ -523,11 +591,12 @@ func TestProvider_BuildConfig(t *testing.T) {
 						Servers: []dynamic.Server{
 							{URL: "http://svc-e.my-ns.maesh:8080"},
 						},
-						PassHostHeader: getBoolRef(true),
+						PassHostHeader: getBoolRef(false),
 					},
 				},
 			},
 			Middlewares: map[string]*dynamic.Middleware{
+				"block-all-whitelist": blockAllWhitelistMiddleware,
 				"my-ns-svc-b": {
 					Retry: &dynamic.Retry{Attempts: 2},
 					RateLimit: &dynamic.RateLimit{
@@ -564,6 +633,15 @@ func nn(name, ns string) topology.NameNamespace {
 	}
 }
 
+func svcPort(name string, port, targetPort int32) v1.ServicePort {
+	return v1.ServicePort{
+		Name:       name,
+		Protocol:   "TCP",
+		Port:       port,
+		TargetPort: intstr.FromInt(int(targetPort)),
+	}
+}
+
 func createPod(ns, name, sa, ip string) *topology.Pod {
 	return &topology.Pod{
 		Name:           name,
@@ -573,21 +651,12 @@ func createPod(ns, name, sa, ip string) *topology.Pod {
 	}
 }
 
-func createSvc(ns, name string, annotations map[string]string, ports []int32, ip string, pods []*topology.Pod) *topology.Service {
-	svcPorts := make([]v1.ServicePort, len(ports))
+func createSvc(ns, name string, annotations map[string]string, ports []v1.ServicePort, ip string, pods []*topology.Pod) *topology.Service {
 	subsetPorts := make([]v1.EndpointPort, len(ports))
-	for i, port := range ports {
-		portName := fmt.Sprintf("port-%d", port)
-		svcPorts[i] = v1.ServicePort{
-			Name:       portName,
-			Protocol:   "TCP",
-			Port:       port,
-			TargetPort: intstr.FromInt(int(port)),
-		}
-
+	for i, p := range ports {
 		subsetPorts[i] = v1.EndpointPort{
-			Name:     portName,
-			Port:     port,
+			Name:     p.Name,
+			Port:     p.TargetPort.IntVal,
 			Protocol: "TCP",
 		}
 	}
@@ -618,7 +687,7 @@ func createSvc(ns, name string, annotations map[string]string, ports []int32, ip
 		Name:        name,
 		Namespace:   ns,
 		Annotations: annotations,
-		Ports:       svcPorts,
+		Ports:       ports,
 		ClusterIP:   ip,
 		Endpoints:   ep,
 	}
@@ -681,5 +750,11 @@ var readinessSvc = &dynamic.Service{
 				URL: "http://127.0.0.1:8080",
 			},
 		},
+	},
+}
+
+var blockAllWhitelistMiddleware = &dynamic.Middleware{
+	IPWhiteList: &dynamic.IPWhiteList{
+		SourceRange: []string{"255.255.255.255"},
 	},
 }

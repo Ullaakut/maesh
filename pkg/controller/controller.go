@@ -215,7 +215,8 @@ func (c *Controller) Run(stopCh <-chan struct{}) error {
 			// Reload the configuration
 			conf, confErr := c.provider.BuildConfig()
 			if confErr != nil {
-				return confErr
+				c.log.Errorf("Invalid dynamic configuration: %v", confErr)
+				continue
 			}
 
 			if message == k8s.ConfigMessageChanForce || !reflect.DeepEqual(c.lastConfiguration.Get(), conf) {
