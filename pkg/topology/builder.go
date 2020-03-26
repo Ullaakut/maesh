@@ -185,6 +185,25 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 				return fmt.Errorf("unable to find Service %s/%s", trafficSplit.Namespace, backend.Service)
 			}
 
+			// As required by the SMI specification, backends must expose at least the same ports as the Service on
+			// which the TrafficSplit is.
+			for _, svcPort := range svc.Ports {
+				var portFound bool
+				for _, backendPort := range backendSvc.Ports {
+					if svcPort.Port == backendPort.Port {
+						portFound = true
+						break
+					}
+				}
+
+				if !portFound {
+					return fmt.Errorf("port %d must be exposed Service %s/%s in order to be used as a TrafficSplit %s/%s backend",
+						svcPort.Port,
+						backendSvc.Namespace, backendSvc.Name,
+						trafficSplit.Namespace, trafficSplit.Name)
+				}
+			}
+
 			backends[i] = TrafficSplitBackend{
 				Weight:  backend.Weight,
 				Service: backendSvc,

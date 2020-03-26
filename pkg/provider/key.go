@@ -6,6 +6,11 @@ import (
 	"github.com/containous/maesh/pkg/topology"
 )
 
+const (
+	blockAllMiddlewareKey = "block-all-middleware"
+	blockAllServiceKey    = "block-all-service"
+)
+
 func getMiddlewareKey(svc *topology.Service) string {
 	return fmt.Sprintf("%s-%s", svc.Namespace, svc.Name)
 }
