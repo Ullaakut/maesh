@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net"
 	"strconv"
-	"strings"
 
 	"github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/topology"
@@ -24,13 +23,7 @@ type TCPPortFinder interface {
 }
 
 // TODO:
-// - Bug when changing target port. the provider returns an error because the tcpportmapping doesn't exist for the given port.
-//   Maybe the shadow service mgr didn't passed on it?
-// - User svc.Port not svc.TargetPort in TrafficSplit backends.
 // - Check if backend is HTTP and if port is exposed on the backend
-// - Allow external definition of middlewares!
-// - Improve rule priority!
-// TBT:
 // - Does the liveness probe and readiness probe works?
 
 // When multiple Traefik Routers listen to the same entrypoint and have the same Rule, the chosen router will be the one
@@ -60,10 +53,11 @@ type Provider struct {
 	defaultTrafficType string
 	maeshNamespace     string
 
-	podLister       v1.PodLister
-	topologyBuilder TopologyBuilder
-	tcpStateTable   TCPPortFinder
-	ignored         k8s.IgnoreWrapper
+	podLister         v1.PodLister
+	topologyBuilder   TopologyBuilder
+	tcpStateTable     TCPPortFinder
+	middlewareBuilder MiddlewareBuilder
+	ignored           k8s.IgnoreWrapper
 }
 
 func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool, defaultTrafficType, maeshNamespace string) *Provider {
@@ -74,6 +68,7 @@ func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable 
 		defaultTrafficType: defaultTrafficType,
 		maeshNamespace:     maeshNamespace,
 		podLister:          podLister,
+		middlewareBuilder:  &DefaultMiddlewareBuilder{},
 		topologyBuilder:    topologyBuilder,
 		tcpStateTable:      tcpStateTable,
 		ignored:            ignored,
@@ -101,7 +96,7 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 		}
 
 		var middlewares []string
-		middleware, err := buildMiddleware(svc)
+		middleware, err := p.middlewareBuilder.Build(svc)
 		if err != nil {
 			return nil, fmt.Errorf("unable to build middlewares for service %s/%s: %w", svc.Namespace, svc.Name, err)
 		}
@@ -199,6 +194,8 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 			cfg.HTTP.Services[key] = buildHTTPServiceFromTrafficTarget(tt, scheme, svcPort.TargetPort.IntVal)
 			cfg.HTTP.Routers[key] = buildHTTPRouter(rule, entrypoint, rtrMiddlewares, key, priorityTrafficTargetDirect)
 
+			// If the ServiceTrafficTarget is a backend of at least one TrafficSplit we need an additional router with
+			// a whitelist middleware which whitelists based on the X-Forwarded-For header instead of on the RemoteAddr value.
 			if len(tt.Service.BackendOf) > 0 {
 				whitelistMiddlewareIndirect := buildWhitelistMiddlewareIndirect(tt, maeshProxyIPs)
 				if whitelistMiddlewareIndirect == nil {
@@ -246,7 +243,9 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 			backendSvcs := make([]dynamic.WRRService, len(ts.Backends))
 			for i, backend := range ts.Backends {
 				key := getServiceRouterKeyFromTrafficSplitBackend(ts, svcPort.Port, backend)
-				cfg.HTTP.Services[key] = buildHTTPSplitTrafficBackendService(backend, scheme, svcPort.TargetPort.IntVal)
+				// This is unclear in SMI's specification if port mapping should be enforced between the Service and the
+				// TrafficSplit backends. https://github.com/servicemeshinterface/smi-spec/blob/master/traffic-split.md#ports
+				cfg.HTTP.Services[key] = buildHTTPSplitTrafficBackendService(backend, scheme, svcPort.Port)
 				backendSvcs[i] = dynamic.WRRService{
 					Name:   key,
 					Weight: getIntRef(backend.Weight),
@@ -355,6 +354,30 @@ func (p Provider) buildTCPEntrypoint(svc *topology.Service, port int32) (string,
 	}
 
 	return fmt.Sprintf("tcp-%d", meshPort), nil
+}
+
+func (p *Provider) getTrafficTypeAnnotation(svc *topology.Service) (string, error) {
+	trafficType, ok := svc.Annotations[k8s.AnnotationServiceType]
+
+	if !ok {
+		return p.defaultTrafficType, nil
+	}
+	if trafficType != k8s.ServiceTypeHTTP && trafficType != k8s.ServiceTypeTCP {
+		return "", fmt.Errorf("traffic-type annotation references an unknown traffic type %q", trafficType)
+	}
+	return trafficType, nil
+}
+
+func getSchemeAnnotation(svc *topology.Service) (string, error) {
+	scheme, ok := svc.Annotations[k8s.AnnotationScheme]
+
+	if !ok {
+		return k8s.SchemeHTTP, nil
+	}
+	if scheme != k8s.SchemeHTTP && scheme != k8s.SchemeH2c && scheme != k8s.SchemeHTTPS {
+		return "", fmt.Errorf("scheme annotation references an unknown scheme %q", scheme)
+	}
+	return scheme, nil
 }
 
 func buildHTTPServiceFromService(svc *topology.Service, scheme string, port int32) *dynamic.Service {
@@ -485,234 +508,6 @@ func buildTCPRouter(routerRule string, entrypoint string, svcKey string) *dynami
 		Service:     svcKey,
 		Rule:        routerRule,
 	}
-}
-
-func buildTrafficTargetRule(tt *topology.ServiceTrafficTarget) string {
-	var orRules []string
-
-	for _, spec := range tt.Specs {
-		for _, match := range spec.HTTPMatches {
-			var matchParts []string
-
-			// Handle Path filtering.
-			if match.PathRegex != "" {
-				pathRegex := match.PathRegex
-
-				if strings.HasPrefix(match.PathRegex, "/") {
-					pathRegex = strings.TrimPrefix(match.PathRegex, "/")
-				}
-
-				matchParts = append(matchParts, fmt.Sprintf("PathPrefix(`/{path:%s}`)", pathRegex))
-			}
-
-			// Handle Method filtering.
-			if len(match.Methods) > 0 {
-				var matchAll bool
-				for _, m := range match.Methods {
-					if m == "*" {
-						matchAll = true
-						break
-					}
-				}
-
-				if !matchAll {
-					methods := strings.Join(match.Methods, "`,`")
-					matchParts = append(matchParts, fmt.Sprintf("Method(`%s`)", methods))
-				}
-			}
-
-			// Conditions within a HTTPMatch must all be fulfilled to be considered valid.
-			if len(matchParts) > 0 {
-				matchCond := strings.Join(matchParts, " && ")
-				if len(matchParts) > 1 {
-					matchCond = fmt.Sprintf("(%s)", matchCond)
-				}
-				orRules = append(orRules, matchCond)
-			}
-		}
-	}
-
-	// At least one HTTPMatch in the Specs must be valid.
-	return strings.Join(orRules, " || ")
-}
-
-func buildHTTPRuleFromService(svc *topology.Service) string {
-	return fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", svc.Name, svc.Namespace, svc.ClusterIP)
-}
-
-func buildHTTPRuleFromTrafficTarget(tt *topology.ServiceTrafficTarget) string {
-	ttRule := buildTrafficTargetRule(tt)
-	httpRule := buildHTTPRuleFromService(tt.Service)
-
-	if ttRule != "" {
-		return fmt.Sprintf("(%s) && (%s)", httpRule, ttRule)
-	}
-	return httpRule
-}
-
-func buildHTTPRuleFromTrafficTargetIndirect(tt *topology.ServiceTrafficTarget) string {
-	ttRule := buildTrafficTargetRule(tt)
-	svcRule := buildHTTPRuleFromService(tt.Service)
-	indirectRule := "HeadersRegexp(`X-Forwarded-For`, `.+`)"
-
-	if ttRule != "" {
-		return fmt.Sprintf("(%s) && (%s) && %s", svcRule, ttRule, indirectRule)
-	}
-	return fmt.Sprintf("(%s) && %s", svcRule, indirectRule)
-}
-
-func buildTCPRouterRule() string {
-	return "HostSNI(`*`)"
-}
-
-func getRulePriority(rule string, priority int) int {
-	andOps := strings.Count(rule, "&&")
-	orOps := strings.Count(rule, "||")
-
-	return priority*1000 + (andOps + orOps)
-}
-
-func buildMiddleware(svc *topology.Service) (*dynamic.Middleware, error) {
-	var circuitBreaker *dynamic.CircuitBreaker
-	var retry *dynamic.Retry
-	var rateLimit *dynamic.RateLimit
-
-	// Build circuit-breaker middleware.
-	if circuitBreakerExpression, ok := svc.Annotations[k8s.AnnotationCircuitBreakerExpression]; ok {
-		circuitBreaker = &dynamic.CircuitBreaker{Expression: circuitBreakerExpression}
-	}
-
-	// Build retry middleware.
-	if retryAttempts, ok := svc.Annotations[k8s.AnnotationRetryAttempts]; ok {
-		attempts, err := strconv.Atoi(retryAttempts)
-		if err != nil {
-			return nil, fmt.Errorf("unable to build retry middleware, %q annotation is invalid: %w", k8s.AnnotationRetryAttempts, err)
-		}
-
-		retry = &dynamic.Retry{Attempts: attempts}
-	}
-
-	// Build rate-limit middleware.
-	rateLimitAverage, hasRateLimitAverage := svc.Annotations[k8s.AnnotationRateLimitAverage]
-	rateLimitBurst, hasRateLimitBurst := svc.Annotations[k8s.AnnotationRateLimitBurst]
-	if hasRateLimitAverage && hasRateLimitBurst {
-		average, err := strconv.Atoi(rateLimitAverage)
-		if err != nil {
-			return nil, fmt.Errorf("unable to build rate-limit middleware, %q annotaiton is invalid: %w", k8s.AnnotationRateLimitAverage, err)
-		}
-
-		burst, err := strconv.Atoi(rateLimitBurst)
-		if err != nil {
-			return nil, fmt.Errorf("unable to build rate-limit middleware, %q annotaiton is invalid: %w", k8s.AnnotationRateLimitBurst, err)
-		}
-
-		if burst <= 0 || average <= 0 {
-			return nil, errors.New("unable to build rate-limit middleware, burst and average must be greater than 0")
-		}
-
-		rateLimit = &dynamic.RateLimit{
-			Average: int64(average),
-			Burst:   int64(burst),
-		}
-	}
-
-	if circuitBreaker == nil && retry == nil && rateLimit == nil {
-		return nil, nil
-	}
-
-	return &dynamic.Middleware{
-		CircuitBreaker: circuitBreaker,
-		RateLimit:      rateLimit,
-		Retry:          retry,
-	}, nil
-}
-
-func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middleware {
-	var IPs []string
-	for _, source := range tt.Sources {
-		for _, pod := range source.Pods {
-			IPs = append(IPs, pod.IP)
-		}
-	}
-
-	if len(IPs) == 0 {
-		return nil
-	}
-
-	return &dynamic.Middleware{
-		IPWhiteList: &dynamic.IPWhiteList{
-			SourceRange: IPs,
-		},
-	}
-}
-
-func buildWhitelistMiddlewareIndirect(tt *topology.ServiceTrafficTarget, maeshProxyIPs []string) *dynamic.Middleware {
-	whitelist := buildWhitelistMiddleware(tt)
-	if whitelist == nil {
-		return nil
-	}
-
-	whitelist.IPWhiteList.IPStrategy = &dynamic.IPStrategy{
-		ExcludedIPs: maeshProxyIPs,
-	}
-
-	return whitelist
-}
-
-func (p *Provider) getTrafficTypeAnnotation(svc *topology.Service) (string, error) {
-	trafficType, ok := svc.Annotations[k8s.AnnotationServiceType]
-
-	if !ok {
-		return p.defaultTrafficType, nil
-	}
-	if trafficType != k8s.ServiceTypeHTTP && trafficType != k8s.ServiceTypeTCP {
-		return "", fmt.Errorf("traffic-type annotation references an unknown traffic type %q", trafficType)
-	}
-	return trafficType, nil
-}
-
-func getSchemeAnnotation(svc *topology.Service) (string, error) {
-	scheme, ok := svc.Annotations[k8s.AnnotationScheme]
-
-	if !ok {
-		return k8s.SchemeHTTP, nil
-	}
-	if scheme != k8s.SchemeHTTP && scheme != k8s.SchemeH2c && scheme != k8s.SchemeHTTPS {
-		return "", fmt.Errorf("scheme annotation references an unknown scheme %q", scheme)
-	}
-	return scheme, nil
-}
-
-func getMiddlewareKey(svc *topology.Service) string {
-	return fmt.Sprintf("%s-%s", svc.Namespace, svc.Name)
-}
-
-func getServiceRouterKeyFromService(svc *topology.Service, port int32) string {
-	return fmt.Sprintf("%s-%s-%d", svc.Namespace, svc.Name, port)
-}
-
-func getWhitelistMiddlewareDirectKey(tt *topology.ServiceTrafficTarget) string {
-	return fmt.Sprintf("%s-%s-%s-whitelist-direct", tt.Service.Namespace, tt.Service.Name, tt.Name)
-}
-
-func getWhitelistMiddlewareIndirectKey(tt *topology.ServiceTrafficTarget) string {
-	return fmt.Sprintf("%s-%s-%s-whitelist-indirect", tt.Service.Namespace, tt.Service.Name, tt.Name)
-}
-
-func getServiceRouterKeyFromTrafficTarget(tt *topology.ServiceTrafficTarget, port int32) string {
-	return fmt.Sprintf("%s-%s-%s-%d-traffic-target", tt.Service.Namespace, tt.Service.Name, tt.Name, port)
-}
-
-func getRouterKeyFromTrafficTargetIndirect(tt *topology.ServiceTrafficTarget, port int32) string {
-	return fmt.Sprintf("%s-%s-%s-%d-traffic-target-indirect", tt.Service.Namespace, tt.Service.Name, tt.Name, port)
-}
-
-func getServiceRouterKeyFromTrafficSplit(ts *topology.TrafficSplit, port int32) string {
-	return fmt.Sprintf("%s-%s-%s-%d-traffic-split", ts.Service.Namespace, ts.Service.Name, ts.Name, port)
-}
-
-func getServiceRouterKeyFromTrafficSplitBackend(ts *topology.TrafficSplit, port int32, backend topology.TrafficSplitBackend) string {
-	return fmt.Sprintf("%s-%s-%s-%d-%s-traffic-split-backend", ts.Service.Namespace, ts.Service.Name, ts.Name, port, backend.Service.Name)
 }
 
 func hasTrafficTargetSpecTCPRoute(tt *topology.ServiceTrafficTarget) bool {
