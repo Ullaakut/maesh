@@ -26,11 +26,10 @@ type TCPPortFinder interface {
 // TODO:
 // - Bug when changing target port. the provider returns an error because the tcpportmapping doesn't exist for the given port.
 //   Maybe the shadow service mgr didn't passed on it?
-// - Services without TT should still create routes with empty whitlist
-// - Test ExcludeIPs
 // - User svc.Port not svc.TargetPort in TrafficSplit backends.
-// - Check the pod status before adding it to the excludedIPs list.
-
+// - Check if backend is HTTP and if port is exposed on the backend
+// - Allow external definition of middlewares!
+// - Improve rule priority!
 // TBT:
 // - Does the liveness probe and readiness probe works?
 
@@ -43,9 +42,10 @@ type TCPPortFinder interface {
 //   will create 2 Traefik Routers. One for the TrafficSplit and one for the TrafficTarget. We should always prioritize
 //   TrafficSplits Routers and so, TrafficSplit Routers should always have a higher priority than TrafficTarget Routers.
 const (
-	priorityService       = 1
-	priorityTrafficTarget = 2
-	priorityTrafficSplit  = 3
+	priorityService               = 1
+	priorityTrafficTargetDirect   = 2
+	priorityTrafficTargetIndirect = 3
+	priorityTrafficSplit          = 4
 )
 
 const (
@@ -180,16 +180,14 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configuration, tt *topology.ServiceTrafficTarget, scheme, trafficType string, middlewares []string, maeshProxyIPs []string) error {
 	switch trafficType {
 	case k8s.ServiceTypeHTTP:
-		whitelistMiddleware := buildWhitelistMiddleware(tt, maeshProxyIPs)
+		whitelistMiddleware := buildWhitelistMiddleware(tt)
 		if whitelistMiddleware == nil {
 			return nil
 		}
-		whitelistMiddlewareKey := getWhitelistMiddlewareKey(tt)
-		cfg.HTTP.Middlewares[whitelistMiddlewareKey] = whitelistMiddleware
-		middlewares = append(middlewares, whitelistMiddlewareKey)
+		whitelistMiddlewareDirectKey := getWhitelistMiddlewareDirectKey(tt)
+		cfg.HTTP.Middlewares[whitelistMiddlewareDirectKey] = whitelistMiddleware
 
-		rule := buildHTTPRouterRule(tt)
-
+		rule := buildHTTPRuleFromTrafficTarget(tt)
 		for portID, svcPort := range tt.Destination.Ports {
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
@@ -197,8 +195,23 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 			}
 
 			key := getServiceRouterKeyFromTrafficTarget(tt, svcPort.Port)
+			rtrMiddlewares := addToSliceCopy(middlewares, whitelistMiddlewareDirectKey)
 			cfg.HTTP.Services[key] = buildHTTPServiceFromTrafficTarget(tt, scheme, svcPort.TargetPort.IntVal)
-			cfg.HTTP.Routers[key] = buildHTTPRouter(rule, entrypoint, middlewares, key, priorityTrafficTarget)
+			cfg.HTTP.Routers[key] = buildHTTPRouter(rule, entrypoint, rtrMiddlewares, key, priorityTrafficTargetDirect)
+
+			if len(tt.Service.BackendOf) > 0 {
+				whitelistMiddlewareIndirect := buildWhitelistMiddlewareIndirect(tt, maeshProxyIPs)
+				if whitelistMiddlewareIndirect == nil {
+					return nil
+				}
+				whitelistMiddlewareIndirectKey := getWhitelistMiddlewareIndirectKey(tt)
+				cfg.HTTP.Middlewares[whitelistMiddlewareIndirectKey] = whitelistMiddlewareIndirect
+
+				indirectKey := getRouterKeyFromTrafficTargetIndirect(tt, svcPort.Port)
+				rule = buildHTTPRuleFromTrafficTargetIndirect(tt)
+				rtrMiddlewares = addToSliceCopy(middlewares, whitelistMiddlewareIndirectKey)
+				cfg.HTTP.Routers[indirectKey] = buildHTTPRouter(rule, entrypoint, rtrMiddlewares, key, priorityTrafficTargetIndirect)
+			}
 		}
 	case k8s.ServiceTypeTCP:
 		if !hasTrafficTargetSpecTCPRoute(tt) {
@@ -227,7 +240,7 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configuration, ts *topology.TrafficSplit, scheme, trafficType string, middlewares []string) error {
 	switch trafficType {
 	case k8s.ServiceTypeHTTP:
-		rule := buildBaseHTTPRouterRule(ts.Service)
+		rule := buildHTTPRuleFromService(ts.Service)
 
 		for portID, svcPort := range ts.Service.Ports {
 			backendSvcs := make([]dynamic.WRRService, len(ts.Backends))
@@ -300,7 +313,7 @@ func (p *Provider) getMaeshProxyIPs() ([]string, error) {
 }
 
 func (p *Provider) buildBlockAllRouters(cfg *dynamic.Configuration, svc *topology.Service) error {
-	rule := buildBaseHTTPRouterRule(svc)
+	rule := buildHTTPRuleFromService(svc)
 
 	for portID, svcPort := range svc.Ports {
 		entrypoint, err := p.buildHTTPEntrypoint(portID)
@@ -462,7 +475,7 @@ func buildHTTPRouter(routerRule string, entrypoint string, middlewares []string,
 		Middlewares: middlewares,
 		Service:     svcKey,
 		Rule:        routerRule,
-		Priority:    priority,
+		Priority:    getRulePriority(routerRule, priority),
 	}
 }
 
@@ -474,14 +487,15 @@ func buildTCPRouter(routerRule string, entrypoint string, svcKey string) *dynami
 	}
 }
 
-func buildHTTPRouterRule(tt *topology.ServiceTrafficTarget) string {
+func buildTrafficTargetRule(tt *topology.ServiceTrafficTarget) string {
 	var orRules []string
 
 	for _, spec := range tt.Specs {
 		for _, match := range spec.HTTPMatches {
 			var matchParts []string
 
-			if len(match.PathRegex) > 0 {
+			// Handle Path filtering.
+			if match.PathRegex != "" {
 				pathRegex := match.PathRegex
 
 				if strings.HasPrefix(match.PathRegex, "/") {
@@ -491,38 +505,71 @@ func buildHTTPRouterRule(tt *topology.ServiceTrafficTarget) string {
 				matchParts = append(matchParts, fmt.Sprintf("PathPrefix(`/{path:%s}`)", pathRegex))
 			}
 
-			if len(match.Methods) > 0 && match.Methods[0] != "*" {
-				methods := strings.Join(match.Methods, "`,`")
-				matchParts = append(matchParts, fmt.Sprintf("Method(`%s`)", methods))
+			// Handle Method filtering.
+			if len(match.Methods) > 0 {
+				var matchAll bool
+				for _, m := range match.Methods {
+					if m == "*" {
+						matchAll = true
+						break
+					}
+				}
+
+				if !matchAll {
+					methods := strings.Join(match.Methods, "`,`")
+					matchParts = append(matchParts, fmt.Sprintf("Method(`%s`)", methods))
+				}
 			}
 
+			// Conditions within a HTTPMatch must all be fulfilled to be considered valid.
 			if len(matchParts) > 0 {
 				matchCond := strings.Join(matchParts, " && ")
-				orRules = append(orRules, fmt.Sprintf("(%s)", matchCond))
+				if len(matchParts) > 1 {
+					matchCond = fmt.Sprintf("(%s)", matchCond)
+				}
+				orRules = append(orRules, matchCond)
 			}
 		}
 	}
 
-	hostRule := buildBaseHTTPRouterRule(tt.Service)
-
-	if len(orRules) > 0 {
-		matches := strings.Join(orRules, " || ")
-		if len(orRules) > 1 {
-			matches = fmt.Sprintf("(%s)", matches)
-		}
-
-		return fmt.Sprintf("(%s) && %s", hostRule, matches)
-	}
-
-	return hostRule
+	// At least one HTTPMatch in the Specs must be valid.
+	return strings.Join(orRules, " || ")
 }
 
-func buildBaseHTTPRouterRule(svc *topology.Service) string {
+func buildHTTPRuleFromService(svc *topology.Service) string {
 	return fmt.Sprintf("Host(`%s.%s.maesh`) || Host(`%s`)", svc.Name, svc.Namespace, svc.ClusterIP)
+}
+
+func buildHTTPRuleFromTrafficTarget(tt *topology.ServiceTrafficTarget) string {
+	ttRule := buildTrafficTargetRule(tt)
+	httpRule := buildHTTPRuleFromService(tt.Service)
+
+	if ttRule != "" {
+		return fmt.Sprintf("(%s) && (%s)", httpRule, ttRule)
+	}
+	return httpRule
+}
+
+func buildHTTPRuleFromTrafficTargetIndirect(tt *topology.ServiceTrafficTarget) string {
+	ttRule := buildTrafficTargetRule(tt)
+	svcRule := buildHTTPRuleFromService(tt.Service)
+	indirectRule := "HeadersRegexp(`X-Forwarded-For`, `.+`)"
+
+	if ttRule != "" {
+		return fmt.Sprintf("(%s) && (%s) && %s", svcRule, ttRule, indirectRule)
+	}
+	return fmt.Sprintf("(%s) && %s", svcRule, indirectRule)
 }
 
 func buildTCPRouterRule() string {
 	return "HostSNI(`*`)"
+}
+
+func getRulePriority(rule string, priority int) int {
+	andOps := strings.Count(rule, "&&")
+	orOps := strings.Count(rule, "||")
+
+	return priority*1000 + (andOps + orOps)
 }
 
 func buildMiddleware(svc *topology.Service) (*dynamic.Middleware, error) {
@@ -580,7 +627,7 @@ func buildMiddleware(svc *topology.Service) (*dynamic.Middleware, error) {
 	}, nil
 }
 
-func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget, maeshProxyIPs []string) *dynamic.Middleware {
+func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middleware {
 	var IPs []string
 	for _, source := range tt.Sources {
 		for _, pod := range source.Pods {
@@ -595,11 +642,21 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget, maeshProxyIPs [
 	return &dynamic.Middleware{
 		IPWhiteList: &dynamic.IPWhiteList{
 			SourceRange: IPs,
-			IPStrategy: &dynamic.IPStrategy{
-				ExcludedIPs: maeshProxyIPs,
-			},
 		},
 	}
+}
+
+func buildWhitelistMiddlewareIndirect(tt *topology.ServiceTrafficTarget, maeshProxyIPs []string) *dynamic.Middleware {
+	whitelist := buildWhitelistMiddleware(tt)
+	if whitelist == nil {
+		return nil
+	}
+
+	whitelist.IPWhiteList.IPStrategy = &dynamic.IPStrategy{
+		ExcludedIPs: maeshProxyIPs,
+	}
+
+	return whitelist
 }
 
 func (p *Provider) getTrafficTypeAnnotation(svc *topology.Service) (string, error) {
@@ -634,12 +691,20 @@ func getServiceRouterKeyFromService(svc *topology.Service, port int32) string {
 	return fmt.Sprintf("%s-%s-%d", svc.Namespace, svc.Name, port)
 }
 
-func getWhitelistMiddlewareKey(tt *topology.ServiceTrafficTarget) string {
-	return fmt.Sprintf("%s-%s-%s-whitelist", tt.Service.Namespace, tt.Service.Name, tt.Name)
+func getWhitelistMiddlewareDirectKey(tt *topology.ServiceTrafficTarget) string {
+	return fmt.Sprintf("%s-%s-%s-whitelist-direct", tt.Service.Namespace, tt.Service.Name, tt.Name)
+}
+
+func getWhitelistMiddlewareIndirectKey(tt *topology.ServiceTrafficTarget) string {
+	return fmt.Sprintf("%s-%s-%s-whitelist-indirect", tt.Service.Namespace, tt.Service.Name, tt.Name)
 }
 
 func getServiceRouterKeyFromTrafficTarget(tt *topology.ServiceTrafficTarget, port int32) string {
 	return fmt.Sprintf("%s-%s-%s-%d-traffic-target", tt.Service.Namespace, tt.Service.Name, tt.Name, port)
+}
+
+func getRouterKeyFromTrafficTargetIndirect(tt *topology.ServiceTrafficTarget, port int32) string {
+	return fmt.Sprintf("%s-%s-%s-%d-traffic-target-indirect", tt.Service.Namespace, tt.Service.Name, tt.Name, port)
 }
 
 func getServiceRouterKeyFromTrafficSplit(ts *topology.TrafficSplit, port int32) string {
@@ -697,6 +762,14 @@ func buildDefaultDynamicConfig() *dynamic.Configuration {
 			Services: map[string]*dynamic.TCPService{},
 		},
 	}
+}
+
+func addToSliceCopy(items []string, item string) []string {
+	cpy := make([]string, len(items)+1)
+	copy(cpy, items)
+	cpy[len(items)] = item
+
+	return cpy
 }
 
 func getBoolRef(v bool) *bool {

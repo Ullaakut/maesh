@@ -171,6 +171,12 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 			return fmt.Errorf("unable to find Service %s/%s", trafficSplit.Namespace, trafficSplit.Spec.Service)
 		}
 
+		ts := &TrafficSplit{
+			Name:      trafficSplit.Name,
+			Namespace: trafficSplit.Namespace,
+			Service:   svc,
+		}
+
 		backends := make([]TrafficSplitBackend, len(trafficSplit.Spec.Backends))
 		for i, backend := range trafficSplit.Spec.Backends {
 			backendSvcKey := NameNamespace{backend.Service, trafficSplit.Namespace}
@@ -183,15 +189,11 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 				Weight:  backend.Weight,
 				Service: backendSvc,
 			}
+			backendSvc.BackendOf = append(backendSvc.BackendOf, ts)
 
 		}
-
-		svc.TrafficSplits = append(svc.TrafficSplits, &TrafficSplit{
-			Name:      trafficSplit.Name,
-			Namespace: trafficSplit.Namespace,
-			Service:   svc,
-			Backends:  backends,
-		})
+		ts.Backends = backends
+		svc.TrafficSplits = append(svc.TrafficSplits, ts)
 	}
 
 	return nil
