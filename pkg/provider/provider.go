@@ -27,12 +27,12 @@ type TCPPortFinder interface {
 // - Bug when changing target port. the provider returns an error because the tcpportmapping doesn't exist for the given port.
 //   Maybe the shadow service mgr didn't passed on it?
 // - Services without TT should still create routes with empty whitlist
-
-// ISSUES:
-// - When querying a service with a traffic-split, if it doesn't have any backend with TT, it waits and return GatewayTimeout...
+// - Test ExcludeIPs
+// - User svc.Port not svc.TargetPort in TrafficSplit backends.
+// - Check the pod status before adding it to the excludedIPs list.
 
 // TBT:
-// - Create 2 TrafficTarget, with different sources pointing on the same service. That might be a huge limitation! Existing limitation!
+// - Does the liveness probe and readiness probe works?
 
 // When multiple Traefik Routers listen to the same entrypoint and have the same Rule, the chosen router will be the one
 // with the highest priority. There are few cases where this priority is crucial when building the dynamic configuration:
@@ -580,7 +580,7 @@ func buildMiddleware(svc *topology.Service) (*dynamic.Middleware, error) {
 	}, nil
 }
 
-func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget, excludedIPs []string) *dynamic.Middleware {
+func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget, maeshProxyIPs []string) *dynamic.Middleware {
 	var IPs []string
 	for _, source := range tt.Sources {
 		for _, pod := range source.Pods {
@@ -596,7 +596,7 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget, excludedIPs []s
 		IPWhiteList: &dynamic.IPWhiteList{
 			SourceRange: IPs,
 			IPStrategy: &dynamic.IPStrategy{
-				ExcludedIPs: excludedIPs,
+				ExcludedIPs: maeshProxyIPs,
 			},
 		},
 	}
