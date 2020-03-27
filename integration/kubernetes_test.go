@@ -26,7 +26,7 @@ func (s *KubernetesSuite) TearDownSuite(c *check.C) {
 }
 
 func (s *KubernetesSuite) TestProviderConfig(c *check.C) {
-	cmd := s.startMaeshBinaryCmd(c, false)
+	cmd := s.startMaeshBinaryCmd(c, false, false)
 	err := cmd.Start()
 
 	c.Assert(err, checker.IsNil)

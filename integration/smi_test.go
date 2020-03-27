@@ -39,7 +39,7 @@ func (s *SMISuite) TestSMIAccessControl(c *check.C) {
 
 	s.waitForPodIPs(c, podsCreated)
 
-	cmd := s.startMaeshBinaryCmd(c, true)
+	cmd := s.startMaeshBinaryCmd(c, true, false)
 	err := cmd.Start()
 
 	c.Assert(err, checker.IsNil)
@@ -73,7 +73,7 @@ func (s *SMISuite) TestSMITrafficSplit(c *check.C) {
 
 	s.waitForPodIPs(c, podsCreated)
 
-	cmd := s.startMaeshBinaryCmd(c, true)
+	cmd := s.startMaeshBinaryCmd(c, true, false)
 	err := cmd.Start()
 
 	c.Assert(err, checker.IsNil)

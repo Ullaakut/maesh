@@ -197,7 +197,7 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 				}
 
 				if !portFound {
-					return fmt.Errorf("port %d must be exposed Service %s/%s in order to be used as a TrafficSplit %s/%s backend",
+					return fmt.Errorf("port %d must be exposed by Service %s/%s in order to be used as a TrafficSplit %s/%s backend",
 						svcPort.Port,
 						backendSvc.Namespace, backendSvc.Name,
 						trafficSplit.Namespace, trafficSplit.Name)
