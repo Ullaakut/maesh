@@ -1,17 +1,11 @@
 package integration
 
 import (
-	"fmt"
-	"io/ioutil"
-	"net/http"
+	"regexp"
 	"time"
-
-	"github.com/containous/maesh/integration/try"
 
 	"github.com/go-check/check"
 	checker "github.com/vdemeester/shakers"
-	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // ACLDisabledSuite
@@ -21,13 +15,15 @@ func (s *ACLDisabledSuite) SetUpSuite(c *check.C) {
 	requiredImages := []string{
 		"containous/maesh:latest",
 		"containous/whoami:v1.0.1",
+		"containous/whoamitcp",
 		"coredns/coredns:1.6.3",
 		"traefik:v2.1.6",
 	}
 	s.startk3s(c, requiredImages)
 	s.startAndWaitForCoreDNS(c)
-	s.createResources(c, "resources/tcp-state-table/")
-	s.createResources(c, "resources/smi/crds/")
+	err := s.installHelmMaesh(c, false, false)
+	c.Assert(err, checker.IsNil)
+	s.waitForMaeshControllerStarted(c)
 }
 
 func (s *ACLDisabledSuite) TearDownSuite(c *check.C) {
@@ -38,83 +34,76 @@ func (s *ACLDisabledSuite) TestHTTPService(c *check.C) {
 	s.createResources(c, "resources/acl/disabled/http")
 	defer s.deleteResources(c, "resources/acl/disabled/http", true)
 
-	cmd := s.startMaeshBinaryCmd(c, false, false)
-	err := cmd.Start()
-
+	err := s.try.WaitPodIPAssigned("client", "ns", 10*time.Second)
 	c.Assert(err, checker.IsNil)
-	defer s.stopMaeshBinary(c, cmd.Process)
 
-	s.waitForReadiness(c, "ns", "client", 10*time.Second)
-	s.waitForReadiness(c, "ns", "server", 20*time.Second)
+	err = s.try.WaitPodIPAssigned("server", "ns", 10*time.Second)
+	c.Assert(err, checker.IsNil)
 
 	args := []string{
-		"get", "all", "-o", "wide",
-		"-n", maeshNamespace,
+		"exec", "-it", "pod/client", "-n", "ns", "--",
+		"curl", "server.ns.maesh:8080",
 	}
-	output, err := s.try.WaitCommandExecuteReturn("kubectl", args, 10*time.Second)
-	c.Log(output)
-	c.Log(err)
 
-	s.printRawData(c, 10*time.Second)
-
-	s.execFromPod(c, "ns", "client", []string{"dig", "server.ns.maesh"}, 10*time.Second)
-
-	s.execFromPod(c, "ns", "client", []string{"curl", "server.ns.maesh:8080"}, 10*time.Second)
-}
-
-func (s *ACLDisabledSuite) getClientPod(c *check.C, ns, name string) *v1.Pod {
-	pod, err := s.client.GetKubernetesClient().CoreV1().Pods(ns).Get(name, metav1.GetOptions{})
+	err = s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
 	c.Assert(err, checker.IsNil)
-	c.Assert(pod, checker.NotNil)
-
-	return pod
 }
 
-func (s *ACLDisabledSuite) waitForReadiness(c *check.C, ns, name string, timeout time.Duration) {
+func (s *ACLDisabledSuite) TestTCPService(c *check.C) {
+	s.createResources(c, "resources/acl/disabled/tcp")
+	defer s.deleteResources(c, "resources/acl/disabled/tcp", true)
+
+	err := s.try.WaitPodIPAssigned("client", "ns", 10*time.Second)
+	c.Assert(err, checker.IsNil)
+
+	err = s.try.WaitPodIPAssigned("server", "ns", 10*time.Second)
+	c.Assert(err, checker.IsNil)
+
 	args := []string{
-		"wait", "--for=condition=Ready",
-		fmt.Sprintf("pod/%s", name),
-		"-n", ns,
+		"exec", "-it", "pod/client", "-n", "ns", "--",
+		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080",
 	}
-	output, err := s.try.WaitCommandExecuteReturn("kubectl", args, timeout)
-	c.Log(output)
+
+	err = s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
 	c.Assert(err, checker.IsNil)
 }
 
-func (s *ACLDisabledSuite) execFromPod(c *check.C, ns, name string, cmdArgs []string, timeout time.Duration) {
+func (s *ACLDisabledSuite) TestTrafficSplit(c *check.C) {
+	s.createResources(c, "resources/acl/disabled/traffic-split")
+	defer s.deleteResources(c, "resources/acl/disabled/traffic-split", true)
+
+	err := s.try.WaitPodIPAssigned("client", "ns", 10*time.Second)
+	c.Assert(err, checker.IsNil)
+
+	err = s.try.WaitPodIPAssigned("server-v1", "ns", 10*time.Second)
+	c.Assert(err, checker.IsNil)
+
+	err = s.try.WaitPodIPAssigned("server-v2", "ns", 10*time.Second)
+	c.Assert(err, checker.IsNil)
+
 	args := []string{
-		"exec", "-it",
-		fmt.Sprintf("pod/%s", name),
-		"-n", ns,
-		"--",
+		"exec", "-i", "pod/client", "-n", "ns", "--",
+		"curl", "server.ns.maesh:8080",
 	}
 
-	for _, arg := range cmdArgs {
-		args = append(args, arg)
-	}
-
-	output, err := s.try.WaitCommandExecuteReturn("kubectl", args, timeout)
-	c.Log(output)
+	// Call two times the Service which has a TrafficSplit.
+	var fstCall, secCall string
+	fstCall, err = s.try.WaitCommandExecuteReturn("kubectl", args, 10*time.Second)
 	c.Assert(err, checker.IsNil)
-}
-
-func (s *ACLDisabledSuite) printRawData(c *check.C, timeout time.Duration) {
-	var output string
-
-	url := fmt.Sprintf("http://127.0.0.1:%d/api/configuration/current", maeshAPIPort)
-	err := try.GetRequest(url, timeout, func(res *http.Response) error {
-		body, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response body: %s", err)
-		}
-		if err = res.Body.Close(); err != nil {
-			return err
-		}
-
-		output = string(body)
-
-		return nil
-	})
-	c.Log(output)
+	secCall, err = s.try.WaitCommandExecuteReturn("kubectl", args, 10*time.Second)
 	c.Assert(err, checker.IsNil)
+
+	// Make sure each call ended up on a different backend.
+	backendHostReg := regexp.MustCompile("Host: server-v(1|2)\\.ns\\.maesh:8080")
+
+	matchFstCall := backendHostReg.FindStringSubmatch(fstCall)
+	c.Assert(matchFstCall, checker.NotNil)
+	matchSecCall := backendHostReg.FindStringSubmatch(secCall)
+	c.Assert(matchSecCall, checker.NotNil)
+
+	backendsHit := make(map[string]bool)
+	backendsHit[matchFstCall[1]] = true
+	backendsHit[matchSecCall[1]] = true
+
+	c.Assert(len(backendsHit), checker.Equals, 2)
 }
