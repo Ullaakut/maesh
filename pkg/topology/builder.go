@@ -10,6 +10,7 @@ import (
 	accessLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/listers/access/v1alpha1"
 	specLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/listers/specs/v1alpha1"
 	splitLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/listers/split/v1alpha2"
+	"github.com/sirupsen/logrus"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	listers "k8s.io/client-go/listers/core/v1"
@@ -23,6 +24,7 @@ type Builder struct {
 	trafficSplitLister   splitLister.TrafficSplitLister
 	httpRouteGroupLister specLister.HTTPRouteGroupLister
 	tcpRoutesLister      specLister.TCPRouteLister
+	logger               logrus.FieldLogger
 }
 
 func NewBuilder(
@@ -32,7 +34,9 @@ func NewBuilder(
 	trafficTargetLister accessLister.TrafficTargetLister,
 	trafficSplitLister splitLister.TrafficSplitLister,
 	httpRouteGroupLister specLister.HTTPRouteGroupLister,
-	tcpRouteLister specLister.TCPRouteLister) *Builder {
+	tcpRouteLister specLister.TCPRouteLister,
+	logger logrus.FieldLogger,
+) *Builder {
 
 	return &Builder{
 		svcLister:            svcLister,
@@ -42,9 +46,13 @@ func NewBuilder(
 		trafficSplitLister:   trafficSplitLister,
 		httpRouteGroupLister: httpRouteGroupLister,
 		tcpRoutesLister:      tcpRouteLister,
+		logger:               logger,
 	}
 }
 
+// Build builds the topoly
+// some errors aren't considered as blocking (a traffic split which refer an unknown service for example).
+// we doing so to not block all the dynamic configuration build and still be able to update loadbalancer and router.
 func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	topology := NewTopology()
 
@@ -69,9 +77,7 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	if err := b.evaluateTrafficTargets(topology); err != nil {
 		return nil, fmt.Errorf("unable to evaluate TrafficTargets: %w", err)
 	}
-	if err := b.evaluateTrafficSplits(topology); err != nil {
-		return nil, fmt.Errorf("unable to evaluate TrafficSplits: %w", err)
-	}
+	b.evaluateTrafficSplits(topology)
 
 	return topology, nil
 }
@@ -107,7 +113,8 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 		// Build traffic target specs.
 		specs, err := b.buildTrafficTargetSpecs(topology, trafficTarget)
 		if err != nil {
-			return fmt.Errorf("unable to build Specs for TrafficTarget %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, err)
+			b.logger.Errorf("unable to build Specs for TrafficTarget %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, err)
+			continue
 		}
 
 		for service, pods := range podsBySvc {
@@ -126,7 +133,8 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 			// Find out which port can be used on the destination service.
 			destPorts, err := b.getTrafficTargetDestinationPorts(service, trafficTarget)
 			if err != nil {
-				return fmt.Errorf("unable to find TrafficTarget %s/%s destination ports for service %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, service.Namespace, service.Name, err)
+				b.logger.Errorf("unable to find TrafficTarget %s/%s destination ports for Service %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, service.Namespace, service.Name, err)
+				continue
 			}
 
 			dest := ServiceTrafficTargetDestination{
@@ -163,12 +171,14 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	return nil
 }
 
-func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
+func (b *Builder) evaluateTrafficSplits(topology *Topology) {
+trafficSplit:
 	for _, trafficSplit := range topology.TrafficSplits {
 		svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
 		svc, ok := topology.Services[svcKey]
 		if !ok {
-			return fmt.Errorf("unable to find Service %s/%s", trafficSplit.Namespace, trafficSplit.Spec.Service)
+			b.logger.Errorf("unable to find root Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
+			continue
 		}
 
 		ts := &TrafficSplit{
@@ -182,7 +192,8 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 			backendSvcKey := NameNamespace{backend.Service, trafficSplit.Namespace}
 			backendSvc, ok := topology.Services[backendSvcKey]
 			if !ok {
-				return fmt.Errorf("unable to find Service %s/%s", trafficSplit.Namespace, backend.Service)
+				b.logger.Errorf("unable to find backend Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
+				continue trafficSplit
 			}
 
 			// As required by the SMI specification, backends must expose at least the same ports as the Service on
@@ -197,10 +208,11 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 				}
 
 				if !portFound {
-					return fmt.Errorf("port %d must be exposed by Service %s/%s in order to be used as a TrafficSplit %s/%s backend",
+					b.logger.Errorf("port %d must be exposed by Service %s/%s in order to be used as a TrafficSplit %s/%s backend",
 						svcPort.Port,
 						backendSvc.Namespace, backendSvc.Name,
 						trafficSplit.Namespace, trafficSplit.Name)
+					continue trafficSplit
 				}
 			}
 
@@ -214,8 +226,6 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) error {
 		ts.Backends = backends
 		svc.TrafficSplits = append(svc.TrafficSplits, ts)
 	}
-
-	return nil
 }
 
 func (b *Builder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {

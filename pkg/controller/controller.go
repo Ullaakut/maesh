@@ -180,9 +180,10 @@ func (c *Controller) init() {
 		c.TrafficTargetLister,
 		c.TrafficSplitLister,
 		c.HTTPRouteGroupLister,
-		c.TCPRouteLister)
+		c.TCPRouteLister,
+		c.log)
 
-	c.provider = provider.New(c.PodLister, topologyBuilder, c.tcpStateTable, c.ignored, c.minHTTPPort, c.maxHTTPPort, c.aclEnabled, c.defaultMode, c.meshNamespace)
+	c.provider = provider.New(c.PodLister, topologyBuilder, c.tcpStateTable, c.ignored, c.minHTTPPort, c.maxHTTPPort, c.aclEnabled, c.defaultMode, c.meshNamespace, c.log)
 }
 
 // Run is the main entrypoint for the controller.

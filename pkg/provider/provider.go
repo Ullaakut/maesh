@@ -9,6 +9,7 @@ import (
 	"github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/topology"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
+	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/selection"
 	v1 "k8s.io/client-go/listers/core/v1"
@@ -58,9 +59,11 @@ type Provider struct {
 	tcpStateTable     TCPPortFinder
 	middlewareBuilder MiddlewareBuilder
 	ignored           k8s.IgnoreWrapper
+
+	logger logrus.FieldLogger
 }
 
-func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool, defaultTrafficType, maeshNamespace string) *Provider {
+func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool, defaultTrafficType, maeshNamespace string, logger logrus.FieldLogger) *Provider {
 	return &Provider{
 		acl:                acl,
 		minHTTPPort:        minHTTPPort,
@@ -72,6 +75,7 @@ func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable 
 		topologyBuilder:    topologyBuilder,
 		tcpStateTable:      tcpStateTable,
 		ignored:            ignored,
+		logger:             logger,
 	}
 }
 
@@ -114,9 +118,7 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 			}
 
 			if trafficType == k8s.ServiceTypeHTTP {
-				if err := p.buildBlockAllRouters(cfg, svc); err != nil {
-					return nil, fmt.Errorf("unable to build routers and services for HTTP service %s/%s: %w", svc.Namespace, svc.Name, err)
-				}
+				p.buildBlockAllRouters(cfg, svc)
 			}
 		} else {
 			if err := p.buildServicesAndRoutersForService(cfg, svc, scheme, trafficType, middlewares); err != nil {
@@ -130,7 +132,6 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 				return nil, fmt.Errorf("unable to build routers and services for service %s/%s and traffic-split %s: %w", svc.Namespace, svc.Name, ts.Name, err)
 			}
 		}
-
 	}
 
 	return cfg, nil
@@ -144,7 +145,8 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 		for portID, svcPort := range svc.Ports {
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
-				return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", svc.Namespace, svc.Name, portID, err)
+				p.logger.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", svc.Namespace, svc.Name, portID, err)
+				continue
 			}
 
 			key := getServiceRouterKeyFromService(svc, svcPort.Port)
@@ -158,7 +160,8 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 		for _, svcPort := range svc.Ports {
 			entrypoint, err := p.buildTCPEntrypoint(svc, svcPort.Port)
 			if err != nil {
-				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", svc.Namespace, svc.Name, svcPort.Port, err)
+				p.logger.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", svc.Namespace, svc.Name, svcPort.Port, err)
+				continue
 			}
 
 			key := getServiceRouterKeyFromService(svc, svcPort.Port)
@@ -186,7 +189,8 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 		for portID, svcPort := range tt.Destination.Ports {
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
-				return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", tt.Service.Namespace, tt.Service.Name, portID, err)
+				p.logger.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", tt.Service.Namespace, tt.Service.Name, portID, err)
+				continue
 			}
 
 			key := getServiceRouterKeyFromTrafficTarget(tt, svcPort.Port)
@@ -220,7 +224,8 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 		for _, svcPort := range tt.Destination.Ports {
 			entrypoint, err := p.buildTCPEntrypoint(tt.Service, svcPort.Port)
 			if err != nil {
-				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", tt.Service.Namespace, tt.Service.Name, svcPort.Port, err)
+				p.logger.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", tt.Service.Namespace, tt.Service.Name, svcPort.Port, err)
+				continue
 			}
 
 			key := getServiceRouterKeyFromTrafficTarget(tt, svcPort.Port)
@@ -254,7 +259,8 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
-				return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", ts.Service.Namespace, ts.Service.Name, portID, err)
+				p.logger.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", ts.Service.Namespace, ts.Service.Name, portID, err)
+				continue
 			}
 
 			key := getServiceRouterKeyFromTrafficSplit(ts, svcPort.Port)
@@ -276,7 +282,8 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 			entrypoint, err := p.buildTCPEntrypoint(ts.Service, svcPort.Port)
 			if err != nil {
-				return fmt.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", ts.Service.Namespace, ts.Service.Name, svcPort.Port, err)
+				p.logger.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", ts.Service.Namespace, ts.Service.Name, svcPort.Port, err)
+				continue
 			}
 
 			key := getServiceRouterKeyFromTrafficSplit(ts, svcPort.Port)
@@ -311,13 +318,14 @@ func (p *Provider) getMaeshProxyIPs() ([]string, error) {
 	return proxyIPs, nil
 }
 
-func (p *Provider) buildBlockAllRouters(cfg *dynamic.Configuration, svc *topology.Service) error {
+func (p *Provider) buildBlockAllRouters(cfg *dynamic.Configuration, svc *topology.Service) {
 	rule := buildHTTPRuleFromService(svc)
 
 	for portID, svcPort := range svc.Ports {
 		entrypoint, err := p.buildHTTPEntrypoint(portID)
 		if err != nil {
-			return fmt.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", svc.Namespace, svc.Name, portID, err)
+			p.logger.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", svc.Namespace, svc.Name, portID, err)
+			continue
 		}
 
 		key := getServiceRouterKeyFromService(svc, svcPort.Port)
@@ -329,8 +337,6 @@ func (p *Provider) buildBlockAllRouters(cfg *dynamic.Configuration, svc *topolog
 			Priority:    priorityService,
 		}
 	}
-
-	return nil
 }
 
 func (p Provider) buildHTTPEntrypoint(portID int) (string, error) {

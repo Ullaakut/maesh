@@ -3,6 +3,7 @@ package provider_test
 import (
 	"context"
 	"fmt"
+	"os"
 	"testing"
 	"time"
 
@@ -11,6 +12,7 @@ import (
 	"github.com/containous/maesh/pkg/topology"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
@@ -49,26 +51,27 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 	ports := []v1.ServicePort{svcPort("port-8080", 8080, 8080)}
 	saB := "sa-b"
 
-	podB1 := createPod("my-ns", "pod-b1", saB, "10.10.2.1")
-	podB2 := createPod("my-ns", "pod-b2", saB, "10.10.2.2")
-	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, ports, "10.10.14.1", []*topology.Pod{podB1, podB2})
-	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.15.1", []*topology.Pod{})
-	svcE := createSvc("my-ns", "svc-e", annotations, ports, "10.10.16.1", []*topology.Pod{})
-	svcF := createSvc("my-ns", "svc-f", svcfAnnotations, ports, "10.10.17.1", []*topology.Pod{podB1, podB2})
-
 	ts := &topology.TrafficSplit{
 		Name:      "ts",
 		Namespace: "my-ns",
-		Service:   svcB,
-		Backends: []topology.TrafficSplitBackend{
-			{
-				Weight:  80,
-				Service: svcD,
-			},
-			{
-				Weight:  20,
-				Service: svcE,
-			},
+	}
+
+	podB1 := createPod("my-ns", "pod-b1", saB, "10.10.2.1")
+	podB2 := createPod("my-ns", "pod-b2", saB, "10.10.2.2")
+	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, ports, "10.10.14.1", []*topology.Pod{podB1, podB2}, nil)
+	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.15.1", []*topology.Pod{}, []*topology.TrafficSplit{ts})
+	svcE := createSvc("my-ns", "svc-e", annotations, ports, "10.10.16.1", []*topology.Pod{}, []*topology.TrafficSplit{ts})
+	svcF := createSvc("my-ns", "svc-f", svcfAnnotations, ports, "10.10.17.1", []*topology.Pod{podB1, podB2}, nil)
+
+	ts.Service = svcB
+	ts.Backends = []topology.TrafficSplitBackend{
+		{
+			Weight:  80,
+			Service: svcD,
+		},
+		{
+			Weight:  20,
+			Service: svcE,
 		},
 	}
 
@@ -98,8 +101,11 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 	podLister, err := createPodLister(client)
 	require.NoError(t, err)
 
+	logger := logrus.New()
+	logger.SetOutput(os.Stdout)
+
 	ignored := mk8s.NewIgnored()
-	provider := provider.New(podLister, TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, false, "http", "maesh")
+	provider := provider.New(podLister, TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, false, "http", "maesh", logger)
 
 	got, err := provider.BuildConfig()
 	require.NoError(t, err)
@@ -112,26 +118,26 @@ func TestProvider_BuildConfigWithACLDisabled(t *testing.T) {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-8080",
-					Priority:    1,
+					Priority:    1001,
 					Middlewares: []string{"my-ns-svc-b"},
 				},
 				"my-ns-svc-b-ts-8080-traffic-split": {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-ts-8080-traffic-split",
-					Priority:    3,
+					Priority:    4001,
 					Middlewares: []string{"my-ns-svc-b"},
 				},
 				"my-ns-svc-d-8080": {
 					Rule:        "Host(`svc-d.my-ns.maesh`) || Host(`10.10.15.1`)",
 					EntryPoints: []string{"http-10000"},
-					Priority:    1,
+					Priority:    1001,
 					Service:     "my-ns-svc-d-8080",
 				},
 				"my-ns-svc-e-8080": {
 					Rule:        "Host(`svc-e.my-ns.maesh`) || Host(`10.10.16.1`)",
 					EntryPoints: []string{"http-10000"},
-					Priority:    1,
+					Priority:    1001,
 					Service:     "my-ns-svc-e-8080",
 				},
 			},
@@ -236,11 +242,28 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 	ports := []v1.ServicePort{svcPort("port-8080", 8080, 8080)}
 	annotations := map[string]string{}
 
+	ts := &topology.TrafficSplit{
+		Name:      "ts",
+		Namespace: "my-ns",
+	}
+
 	podA := createPod("my-ns", "pod-a", saA, "10.10.1.1")
 	podB := createPod("my-ns", "pod-b", saB, "10.10.1.2")
-	svcB := createSvc("my-ns", "svc-b", annotations, ports, "10.10.13.1", []*topology.Pod{podB})
-	svcC := createSvc("my-ns", "svc-c", annotations, ports, "10.10.13.2", []*topology.Pod{})
-	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.13.3", []*topology.Pod{})
+	svcB := createSvc("my-ns", "svc-b", annotations, ports, "10.10.13.1", []*topology.Pod{podB}, nil)
+	svcC := createSvc("my-ns", "svc-c", annotations, ports, "10.10.13.2", nil, []*topology.TrafficSplit{ts})
+	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.13.3", nil, []*topology.TrafficSplit{ts})
+
+	ts.Service = svcB
+	ts.Backends = []topology.TrafficSplitBackend{
+		{
+			Weight:  80,
+			Service: svcC,
+		},
+		{
+			Weight:  20,
+			Service: svcD,
+		},
+	}
 
 	tt := &topology.ServiceTrafficTarget{
 		Service: svcB,
@@ -261,22 +284,6 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 		Specs: []topology.TrafficSpec{
 			{
 				TCPRoute: createTCPRoute("my-ns", "my-tcp-route"),
-			},
-		},
-	}
-
-	ts := &topology.TrafficSplit{
-		Name:      "ts",
-		Namespace: "my-ns",
-		Service:   svcB,
-		Backends: []topology.TrafficSplitBackend{
-			{
-				Weight:  80,
-				Service: svcC,
-			},
-			{
-				Weight:  20,
-				Service: svcD,
 			},
 		},
 	}
@@ -309,8 +316,11 @@ func TestProvider_BuildConfigTCP(t *testing.T) {
 	podLister, err := createPodLister(client)
 	require.NoError(t, err)
 
+	logger := logrus.New()
+	logger.SetOutput(os.Stdout)
+
 	ignored := mk8s.NewIgnored()
-	provider := provider.New(podLister, TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, true, "tcp", "maesh")
+	provider := provider.New(podLister, TopologyBuilderMock(builder), tcpStateTableMock(tcpStatetable), ignored, 10000, 10001, true, "tcp", "maesh", logger)
 
 	got, err := provider.BuildConfig()
 	require.NoError(t, err)
@@ -404,14 +414,31 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 	saB := "sa-b"
 	saC := "sa-c"
 
+	ts := &topology.TrafficSplit{
+		Name:      "ts",
+		Namespace: "my-ns",
+	}
+
 	podA := createPod("my-ns", "pod-a", saA, "10.10.1.1")
-	svcA := createSvc("my-ns", "svc-a", annotations, svcaPorts, "10.10.13.1", []*topology.Pod{podA})
+	svcA := createSvc("my-ns", "svc-a", annotations, svcaPorts, "10.10.13.1", []*topology.Pod{podA}, nil)
 	podC := createPod("my-ns", "pod-c", saC, "10.10.3.1")
 	podB1 := createPod("my-ns", "pod-b1", saB, "10.10.2.1")
 	podB2 := createPod("my-ns", "pod-b2", saB, "10.10.2.2")
-	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, ports, "10.10.14.1", []*topology.Pod{podB1, podB2})
-	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.15.1", []*topology.Pod{})
-	svcE := createSvc("my-ns", "svc-e", annotations, ports, "10.10.16.1", []*topology.Pod{})
+	svcB := createSvc("my-ns", "svc-b", svcbAnnotations, ports, "10.10.14.1", []*topology.Pod{podB1, podB2}, []*topology.TrafficSplit{ts})
+	svcD := createSvc("my-ns", "svc-d", annotations, ports, "10.10.15.1", nil, []*topology.TrafficSplit{ts})
+	svcE := createSvc("my-ns", "svc-e", annotations, ports, "10.10.16.1", nil, []*topology.TrafficSplit{ts})
+
+	ts.Service = svcB
+	ts.Backends = []topology.TrafficSplitBackend{
+		{
+			Weight:  80,
+			Service: svcD,
+		},
+		{
+			Weight:  20,
+			Service: svcE,
+		},
+	}
 
 	apiMatch := createHTTPMatch("api", []string{"GET"}, "/api")
 	metricMatch := createHTTPMatch("metric", []string{"POST"}, "/metric")
@@ -448,21 +475,6 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 			},
 		},
 	}
-	ts := &topology.TrafficSplit{
-		Name:      "ts",
-		Namespace: "my-ns",
-		Service:   svcB,
-		Backends: []topology.TrafficSplitBackend{
-			{
-				Weight:  80,
-				Service: svcD,
-			},
-			{
-				Weight:  20,
-				Service: svcE,
-			},
-		},
-	}
 
 	podA.Outgoing = []*topology.ServiceTrafficTarget{tt}
 	podC.Outgoing = []*topology.ServiceTrafficTarget{tt}
@@ -489,12 +501,27 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 		return top, nil
 	}
 
-	client := fake.NewSimpleClientset()
+	podMaesh := &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "maesh",
+			Labels: map[string]string{
+				"component": "maesh-mesh",
+			},
+		},
+		Status: v1.PodStatus{
+			PodIP: "10.10.10.10",
+		},
+	}
+
+	client := fake.NewSimpleClientset(podMaesh)
 	podLister, err := createPodLister(client)
 	require.NoError(t, err)
 
+	logger := logrus.New()
+	logger.SetOutput(os.Stdout)
+
 	ignored := mk8s.NewIgnored()
-	provider := provider.New(podLister, TopologyBuilderMock(builder), nil, ignored, 10000, 10001, true, "http", "maesh")
+	provider := provider.New(podLister, TopologyBuilderMock(builder), nil, ignored, 10000, 10001, true, "http", "maesh", logger)
 
 	got, err := provider.BuildConfig()
 	require.NoError(t, err)
@@ -535,14 +562,21 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 					Rule:        "(Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)) && ((PathPrefix(`/{path:api}`) && Method(`GET`)) || (PathPrefix(`/{path:metric}`) && Method(`POST`)))",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-tt-8080-traffic-target",
-					Priority:    2,
-					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist"},
+					Priority:    2005,
+					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist-direct"},
+				},
+				"my-ns-svc-b-tt-8080-traffic-target-indirect": {
+					Rule:        "(Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)) && ((PathPrefix(`/{path:api}`) && Method(`GET`)) || (PathPrefix(`/{path:metric}`) && Method(`POST`))) && HeadersRegexp(`X-Forwarded-For`, `.+`)",
+					EntryPoints: []string{"http-10000"},
+					Service:     "my-ns-svc-b-tt-8080-traffic-target",
+					Priority:    3006,
+					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist-indirect"},
 				},
 				"my-ns-svc-b-ts-8080-traffic-split": {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-ts-8080-traffic-split",
-					Priority:    3,
+					Priority:    4001,
 					Middlewares: []string{"my-ns-svc-b"},
 				},
 			},
@@ -601,14 +635,22 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 						Expression: "LatencyAtQuantileMS(50.0) > 100",
 					},
 				},
-				"my-ns-svc-b-tt-whitelist": {
+				"my-ns-svc-b-tt-whitelist-direct": {
+					IPWhiteList: &dynamic.IPWhiteList{
+						SourceRange: []string{
+							"10.10.1.1",
+							"10.10.3.1",
+						},
+					},
+				},
+				"my-ns-svc-b-tt-whitelist-indirect": {
 					IPWhiteList: &dynamic.IPWhiteList{
 						SourceRange: []string{
 							"10.10.1.1",
 							"10.10.3.1",
 						},
 						IPStrategy: &dynamic.IPStrategy{
-							ExcludedIPs: []string{},
+							ExcludedIPs: []string{"10.10.10.10"},
 						},
 					},
 				},
@@ -648,7 +690,7 @@ func createPod(ns, name, sa, ip string) *topology.Pod {
 	}
 }
 
-func createSvc(ns, name string, annotations map[string]string, ports []v1.ServicePort, ip string, pods []*topology.Pod) *topology.Service {
+func createSvc(ns, name string, annotations map[string]string, ports []v1.ServicePort, ip string, pods []*topology.Pod, backendOf []*topology.TrafficSplit) *topology.Service {
 	subsetPorts := make([]v1.EndpointPort, len(ports))
 	for i, p := range ports {
 		subsetPorts[i] = v1.EndpointPort{
@@ -687,6 +729,7 @@ func createSvc(ns, name string, annotations map[string]string, ports []v1.Servic
 		Ports:       ports,
 		ClusterIP:   ip,
 		Endpoints:   ep,
+		BackendOf:   backendOf,
 	}
 }
 
