@@ -82,38 +82,48 @@ func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable 
 func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 	cfg := buildDefaultDynamicConfig()
 
-	topology, err := p.topologyBuilder.Build(p.ignored)
+	t, err := p.topologyBuilder.Build(p.ignored)
 	if err != nil {
 		return nil, fmt.Errorf("unable to build topology: %w", err)
 	}
 
 	maeshProxyIPs, err := p.getMaeshProxyIPs()
+	if err != nil {
+		return nil, fmt.Errorf("unable to find Maesh proxies: %w", err)
+	}
 
-	for _, svc := range topology.Services {
+	for _, svc := range t.Services {
 		trafficType, err := p.getTrafficTypeAnnotation(svc)
 		if err != nil {
-			return nil, fmt.Errorf("unable to evaluate traffic-type annotation on service %s/%s: %w", svc.Namespace, svc.Name, err)
+			p.logger.Errorf("Unable to evaluate traffic-type annotation on service %s/%s: %v", svc.Namespace, svc.Name, err)
+			continue
 		}
 		scheme, err := getSchemeAnnotation(svc)
 		if err != nil {
-			return nil, fmt.Errorf("unable to evaluate scheme annotation on service %s/%s: %w", svc.Namespace, svc.Name, err)
+			p.logger.Errorf("Unable to evaluate scheme annotation on service %s/%s: %v", svc.Namespace, svc.Name, err)
+			continue
 		}
 
 		var middlewares []string
-		middleware, err := p.middlewareBuilder.Build(svc)
-		if err != nil {
-			return nil, fmt.Errorf("unable to build middlewares for service %s/%s: %w", svc.Namespace, svc.Name, err)
-		}
-		if middleware != nil {
-			middlewareKey := getMiddlewareKey(svc)
-			cfg.HTTP.Middlewares[middlewareKey] = middleware
-			middlewares = append(middlewares, middlewareKey)
+
+		if trafficType == k8s.ServiceTypeHTTP {
+			middleware, err := p.middlewareBuilder.Build(svc)
+			if err != nil {
+				p.logger.Errorf("Unable to build middlewares for service %s/%s: %v", svc.Namespace, svc.Name, err)
+				continue
+			}
+			if middleware != nil {
+				middlewareKey := getMiddlewareKey(svc)
+				cfg.HTTP.Middlewares[middlewareKey] = middleware
+				middlewares = append(middlewares, middlewareKey)
+			}
 		}
 
 		if p.acl {
 			for _, tt := range svc.TrafficTargets {
 				if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares, maeshProxyIPs); err != nil {
-					return nil, fmt.Errorf("unable to build routers and services for service %s/%s and traffic-split %s: %w", svc.Namespace, svc.Name, tt.Name, err)
+					p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-split %s: %v", svc.Namespace, svc.Name, tt.Name, err)
+					continue
 				}
 			}
 
@@ -122,14 +132,16 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 			}
 		} else {
 			if err := p.buildServicesAndRoutersForService(cfg, svc, scheme, trafficType, middlewares); err != nil {
-				return nil, fmt.Errorf("unable to build routers and services for service %s/%s: %w", svc.Namespace, svc.Name, err)
+				p.logger.Errorf("Unable to build routers and services for service %s/%s: %v", svc.Namespace, svc.Name, err)
+				continue
 			}
 		}
 
 		// Create a router and a service for each TrafficSplit attached on the k8s service.
 		for _, ts := range svc.TrafficSplits {
 			if err := p.buildServiceAndRoutersForTrafficSplits(cfg, ts, scheme, trafficType, middlewares); err != nil {
-				return nil, fmt.Errorf("unable to build routers and services for service %s/%s and traffic-split %s: %w", svc.Namespace, svc.Name, ts.Name, err)
+				p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-split %s: %v", svc.Namespace, svc.Name, ts.Name, err)
+				continue
 			}
 		}
 	}
@@ -145,7 +157,7 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 		for portID, svcPort := range svc.Ports {
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
-				p.logger.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", svc.Namespace, svc.Name, portID, err)
+				p.logger.Errorf("Unable to build HTTP entrypoint for Service %s/%s and portID %d: %v", svc.Namespace, svc.Name, portID, err)
 				continue
 			}
 
@@ -160,7 +172,7 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 		for _, svcPort := range svc.Ports {
 			entrypoint, err := p.buildTCPEntrypoint(svc, svcPort.Port)
 			if err != nil {
-				p.logger.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", svc.Namespace, svc.Name, svcPort.Port, err)
+				p.logger.Errorf("Unable to build TCP entrypoint for Service %s/%s and port %d: %v", svc.Namespace, svc.Name, svcPort.Port, err)
 				continue
 			}
 
@@ -169,7 +181,7 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 			cfg.TCP.Routers[key] = buildTCPRouter(rule, entrypoint, key)
 		}
 	default:
-		return fmt.Errorf("unknown traffic-type %q for service %s/%s", trafficType, svc.Namespace, svc.Name)
+		return fmt.Errorf("unknown traffic-type %q", trafficType)
 	}
 
 	return nil
@@ -179,9 +191,6 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 	switch trafficType {
 	case k8s.ServiceTypeHTTP:
 		whitelistMiddleware := buildWhitelistMiddleware(tt)
-		if whitelistMiddleware == nil {
-			return nil
-		}
 		whitelistMiddlewareDirectKey := getWhitelistMiddlewareDirectKey(tt)
 		cfg.HTTP.Middlewares[whitelistMiddlewareDirectKey] = whitelistMiddleware
 
@@ -189,7 +198,7 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 		for portID, svcPort := range tt.Destination.Ports {
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
-				p.logger.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", tt.Service.Namespace, tt.Service.Name, portID, err)
+				p.logger.Errorf("Unable to build HTTP entrypoint for Service %s/%s and portID %d: %v", tt.Service.Namespace, tt.Service.Name, portID, err)
 				continue
 			}
 
@@ -202,9 +211,6 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 			// a whitelist middleware which whitelists based on the X-Forwarded-For header instead of on the RemoteAddr value.
 			if len(tt.Service.BackendOf) > 0 {
 				whitelistMiddlewareIndirect := buildWhitelistMiddlewareIndirect(tt, maeshProxyIPs)
-				if whitelistMiddlewareIndirect == nil {
-					return nil
-				}
 				whitelistMiddlewareIndirectKey := getWhitelistMiddlewareIndirectKey(tt)
 				cfg.HTTP.Middlewares[whitelistMiddlewareIndirectKey] = whitelistMiddlewareIndirect
 
@@ -224,7 +230,7 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 		for _, svcPort := range tt.Destination.Ports {
 			entrypoint, err := p.buildTCPEntrypoint(tt.Service, svcPort.Port)
 			if err != nil {
-				p.logger.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", tt.Service.Namespace, tt.Service.Name, svcPort.Port, err)
+				p.logger.Errorf("Unable to build TCP entrypoint for Service %s/%s and port %d: %v", tt.Service.Namespace, tt.Service.Name, svcPort.Port, err)
 				continue
 			}
 
@@ -233,7 +239,7 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 			cfg.TCP.Routers[key] = buildTCPRouter(rule, entrypoint, key)
 		}
 	default:
-		return fmt.Errorf("unknown traffic-type %q for service %s/%s", trafficType, tt.Service.Namespace, tt.Service.Name)
+		return fmt.Errorf("unknown traffic-type %q", trafficType)
 	}
 
 	return nil
@@ -259,7 +265,7 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
-				p.logger.Errorf("unable to build HTTP entrypoint for Service %s/%s and portID %d: %w", ts.Service.Namespace, ts.Service.Name, portID, err)
+				p.logger.Errorf("Unable to build HTTP entrypoint for Service %s/%s and portID %d: %v", ts.Service.Namespace, ts.Service.Name, portID, err)
 				continue
 			}
 
@@ -282,7 +288,7 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 			entrypoint, err := p.buildTCPEntrypoint(ts.Service, svcPort.Port)
 			if err != nil {
-				p.logger.Errorf("unable to build TCP entrypoint for Service %s/%s and port %d: %w", ts.Service.Namespace, ts.Service.Name, svcPort.Port, err)
+				p.logger.Errorf("Unable to build TCP entrypoint for Service %s/%s and port %d: %v", ts.Service.Namespace, ts.Service.Name, svcPort.Port, err)
 				continue
 			}
 
@@ -292,7 +298,7 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 		}
 
 	default:
-		return fmt.Errorf("unknown traffic-type %q for service %s/%s", trafficType, ts.Service.Namespace, ts.Service.Name)
+		return fmt.Errorf("unknown traffic-type %q", trafficType)
 	}
 
 	return nil

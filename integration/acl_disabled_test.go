@@ -1,6 +1,8 @@
 package integration
 
 import (
+	"errors"
+	"fmt"
 	"regexp"
 	"time"
 
@@ -17,11 +19,12 @@ func (s *ACLDisabledSuite) SetUpSuite(c *check.C) {
 		"containous/whoami:v1.0.1",
 		"containous/whoamitcp",
 		"coredns/coredns:1.6.3",
+		"giantswarm/tiny-tools:3.9",
 		"traefik:v2.1.6",
 	}
 	s.startk3s(c, requiredImages)
 	s.startAndWaitForCoreDNS(c)
-	err := s.installHelmMaesh(c, false, false)
+	err := s.installHelmMaesh(c, false, false, false)
 	c.Assert(err, checker.IsNil)
 	s.waitForMaeshControllerStarted(c)
 }
@@ -34,18 +37,14 @@ func (s *ACLDisabledSuite) TestHTTPService(c *check.C) {
 	s.createResources(c, "resources/acl/disabled/http")
 	defer s.deleteResources(c, "resources/acl/disabled/http", true)
 
-	err := s.try.WaitPodIPAssigned("client", "ns", 10*time.Second)
-	c.Assert(err, checker.IsNil)
-
-	err = s.try.WaitPodIPAssigned("server", "ns", 10*time.Second)
-	c.Assert(err, checker.IsNil)
+	s.waitForPods(c, []string{"client", "server"})
 
 	args := []string{
 		"exec", "-it", "pod/client", "-n", "ns", "--",
 		"curl", "server.ns.maesh:8080",
 	}
 
-	err = s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
+	err := s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
 	c.Assert(err, checker.IsNil)
 }
 
@@ -53,18 +52,14 @@ func (s *ACLDisabledSuite) TestTCPService(c *check.C) {
 	s.createResources(c, "resources/acl/disabled/tcp")
 	defer s.deleteResources(c, "resources/acl/disabled/tcp", true)
 
-	err := s.try.WaitPodIPAssigned("client", "ns", 10*time.Second)
-	c.Assert(err, checker.IsNil)
-
-	err = s.try.WaitPodIPAssigned("server", "ns", 10*time.Second)
-	c.Assert(err, checker.IsNil)
+	s.waitForPods(c, []string{"client", "server"})
 
 	args := []string{
 		"exec", "-it", "pod/client", "-n", "ns", "--",
 		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080",
 	}
 
-	err = s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
+	err := s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
 	c.Assert(err, checker.IsNil)
 }
 
@@ -72,38 +67,49 @@ func (s *ACLDisabledSuite) TestTrafficSplit(c *check.C) {
 	s.createResources(c, "resources/acl/disabled/traffic-split")
 	defer s.deleteResources(c, "resources/acl/disabled/traffic-split", true)
 
-	err := s.try.WaitPodIPAssigned("client", "ns", 10*time.Second)
-	c.Assert(err, checker.IsNil)
+	s.waitForPods(c, []string{"client", "server-v1", "server-v2"})
 
-	err = s.try.WaitPodIPAssigned("server-v1", "ns", 10*time.Second)
-	c.Assert(err, checker.IsNil)
+	err := s.try.Retry(func() error {
+		var fstCall, secCall string
+		var err error
 
-	err = s.try.WaitPodIPAssigned("server-v2", "ns", 10*time.Second)
-	c.Assert(err, checker.IsNil)
+		// Call two times the Service which has a TrafficSplit.
+		fstCall, err = s.kubectlExec("ns", "pod/client", "curl", "server.ns.maesh:8080")
+		if err != nil {
+			return err
+		}
+		secCall, err = s.kubectlExec("ns", "pod/client", "curl", "server.ns.maesh:8080")
+		if err != nil {
+			return err
+		}
 
-	args := []string{
-		"exec", "-i", "pod/client", "-n", "ns", "--",
-		"curl", "server.ns.maesh:8080",
+		// Make sure each call ended up on a different backend.
+		backendHostReg := regexp.MustCompile("Host: server-v([12])\\.ns\\.maesh:8080")
+		backendsHit := make(map[string]bool)
+
+		matchFstCall := backendHostReg.FindStringSubmatch(fstCall)
+		if matchFstCall == nil {
+			return errors.New("unable to find Host header in response")
+		}
+		backendsHit[matchFstCall[1]] = true
+
+		matchSecCall := backendHostReg.FindStringSubmatch(secCall)
+		if matchSecCall == nil {
+			return errors.New("unable to find Host header in response")
+		}
+		backendsHit[matchSecCall[1]] = true
+
+		if len(backendsHit) != 2 {
+			return fmt.Errorf("expected to hit 2 different backends, got %d", len(backendsHit))
+		}
+		return nil
+	}, 10*time.Second)
+	c.Assert(err, checker.IsNil)
+}
+
+func (s *ACLDisabledSuite) waitForPods(c *check.C, pods []string) {
+	for _, pod := range pods {
+		err := s.try.WaitPodIPAssigned(pod, "ns", 20*time.Second)
+		c.Assert(err, checker.IsNil)
 	}
-
-	// Call two times the Service which has a TrafficSplit.
-	var fstCall, secCall string
-	fstCall, err = s.try.WaitCommandExecuteReturn("kubectl", args, 10*time.Second)
-	c.Assert(err, checker.IsNil)
-	secCall, err = s.try.WaitCommandExecuteReturn("kubectl", args, 10*time.Second)
-	c.Assert(err, checker.IsNil)
-
-	// Make sure each call ended up on a different backend.
-	backendHostReg := regexp.MustCompile("Host: server-v(1|2)\\.ns\\.maesh:8080")
-
-	matchFstCall := backendHostReg.FindStringSubmatch(fstCall)
-	c.Assert(matchFstCall, checker.NotNil)
-	matchSecCall := backendHostReg.FindStringSubmatch(secCall)
-	c.Assert(matchSecCall, checker.NotNil)
-
-	backendsHit := make(map[string]bool)
-	backendsHit[matchFstCall[1]] = true
-	backendsHit[matchSecCall[1]] = true
-
-	c.Assert(len(backendsHit), checker.Equals, 2)
 }

@@ -83,10 +83,6 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middle
 		}
 	}
 
-	if len(IPs) == 0 {
-		return nil
-	}
-
 	return &dynamic.Middleware{
 		IPWhiteList: &dynamic.IPWhiteList{
 			SourceRange: IPs,
@@ -98,10 +94,6 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middle
 // to be used when there is at least one proxy between the authorized Pod and this Maesh proxy.
 func buildWhitelistMiddlewareIndirect(tt *topology.ServiceTrafficTarget, maeshProxyIPs []string) *dynamic.Middleware {
 	whitelist := buildWhitelistMiddleware(tt)
-	if whitelist == nil {
-		return nil
-	}
-
 	whitelist.IPWhiteList.IPStrategy = &dynamic.IPStrategy{
 		ExcludedIPs: maeshProxyIPs,
 	}

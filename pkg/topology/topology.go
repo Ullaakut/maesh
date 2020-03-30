@@ -173,6 +173,12 @@ func (t *Topology) Dump() string {
 						s += leftPadf(6, "- %s/%s", pod.Namespace, pod.Name)
 					}
 				}
+				if len(tt.Destination.Ports) > 0 {
+					s += leftPadf(5, "Ports:")
+					for _, svcPort := range tt.Destination.Ports {
+						s += leftPadf(6, "- %d -> %d", svcPort.Port, svcPort.TargetPort.IntVal)
+					}
+				}
 
 				if len(tt.Specs) > 0 {
 					s += leftPadf(4, "Specs:")

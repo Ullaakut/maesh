@@ -53,9 +53,8 @@ func Test(t *testing.T) {
 	}
 
 	check.Suite(&ACLDisabledSuite{})
+	check.Suite(&ACLEnabledSuite{})
 	//check.Suite(&CoreDNSSuite{})
-	//check.Suite(&SMISuite{})
-	//check.Suite(&KubernetesSuite{})
 	//check.Suite(&KubeDNSSuite{})
 	//check.Suite(&HelmSuite{})
 
@@ -247,6 +246,23 @@ func (s *BaseSuite) stopK3s() {
 	fmt.Println(string(output))
 }
 
+func (s *BaseSuite) kubectlExec(ns, name string, cmdArgs ...string) (string, error) {
+	args := []string{"exec", "-i", name, "-n", ns, "--"}
+
+	for _, arg := range cmdArgs {
+		args = append(args, arg)
+	}
+
+	cmd := exec.Command("kubectl", args...)
+	cmd.Env = os.Environ()
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("unable execute kubectl exec %s - output %s: %v", strings.Join(args, " "), output, err)
+	}
+
+	return string(output), err
+}
+
 func (s *BaseSuite) kubectlCommand(c *check.C, args ...string) {
 	args = append(args, fmt.Sprintf("--kubeconfig=%s", os.Getenv("KUBECONFIG")))
 	cmd := exec.Command("kubectl", args...)
@@ -316,7 +332,7 @@ func (s *BaseSuite) createRequiredNamespaces(c *check.C) {
 	s.kubectlCommand(c, "create", "namespace", testNamespace)
 }
 
-func (s *BaseSuite) installHelmMaesh(c *check.C, smi bool, kubeDNS bool) error {
+func (s *BaseSuite) installHelmMaesh(c *check.C, smi bool, kubeDNS bool, acl bool) error {
 	c.Log("Installing Maesh via helm...")
 	// Install the helm chart.
 	argSlice := []string{"install", "powpow", "../helm/chart/maesh", "--values", "resources/values.yaml", "--namespace", maeshNamespace}
@@ -328,6 +344,10 @@ func (s *BaseSuite) installHelmMaesh(c *check.C, smi bool, kubeDNS bool) error {
 
 	if kubeDNS {
 		argSlice = append(argSlice, "--set", "kubedns=true")
+	}
+
+	if acl {
+		argSlice = append(argSlice, "--set", "acl=true")
 	}
 
 	return s.try.WaitCommandExecute("helm", argSlice, "powpow", 10*time.Second)

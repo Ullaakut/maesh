@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
+
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
@@ -100,7 +102,6 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	for _, trafficTarget := range topology.TrafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
 
-		//
 		// Group destination pods by service.
 		podsBySvc, err := b.groupPodsByService(podsBySa[destSaKey])
 		if err != nil {
@@ -113,7 +114,7 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 		// Build traffic target specs.
 		specs, err := b.buildTrafficTargetSpecs(topology, trafficTarget)
 		if err != nil {
-			b.logger.Errorf("unable to build Specs for TrafficTarget %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, err)
+			b.logger.Errorf("Unable to build Specs for TrafficTarget %s/%s: %v", trafficTarget.Namespace, trafficTarget.Name, err)
 			continue
 		}
 
@@ -127,13 +128,16 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 			// Find out who are the destination pods.
 			destPods := make([]*Pod, len(pods))
 			for i, pod := range pods {
+				if pod.Status.PodIP == "" {
+					continue
+				}
 				destPods[i] = getOrCreatePod(topology, pod)
 			}
 
 			// Find out which port can be used on the destination service.
 			destPorts, err := b.getTrafficTargetDestinationPorts(service, trafficTarget)
 			if err != nil {
-				b.logger.Errorf("unable to find TrafficTarget %s/%s destination ports for Service %s/%s: %w", trafficTarget.Namespace, trafficTarget.Name, service.Namespace, service.Name, err)
+				b.logger.Errorf("Unable to get TrafficTarget %s/%s destination ports on Service %s/%s: %v", trafficTarget.Namespace, trafficTarget.Name, service.Namespace, service.Name, err)
 				continue
 			}
 
@@ -171,60 +175,64 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	return nil
 }
 
-func (b *Builder) evaluateTrafficSplits(topology *Topology) {
-trafficSplit:
-	for _, trafficSplit := range topology.TrafficSplits {
-		svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
-		svc, ok := topology.Services[svcKey]
+func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha2.TrafficSplit) error {
+	svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
+	svc, ok := topology.Services[svcKey]
+	if !ok {
+		return fmt.Errorf("unable to find root Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
+	}
+
+	ts := &TrafficSplit{
+		Name:      trafficSplit.Name,
+		Namespace: trafficSplit.Namespace,
+		Service:   svc,
+	}
+
+	backends := make([]TrafficSplitBackend, len(trafficSplit.Spec.Backends))
+	for i, backend := range trafficSplit.Spec.Backends {
+		backendSvcKey := NameNamespace{backend.Service, trafficSplit.Namespace}
+		backendSvc, ok := topology.Services[backendSvcKey]
 		if !ok {
-			b.logger.Errorf("unable to find root Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
-			continue
+			return fmt.Errorf("unable to find backend Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
 		}
 
-		ts := &TrafficSplit{
-			Name:      trafficSplit.Name,
-			Namespace: trafficSplit.Namespace,
-			Service:   svc,
-		}
-
-		backends := make([]TrafficSplitBackend, len(trafficSplit.Spec.Backends))
-		for i, backend := range trafficSplit.Spec.Backends {
-			backendSvcKey := NameNamespace{backend.Service, trafficSplit.Namespace}
-			backendSvc, ok := topology.Services[backendSvcKey]
-			if !ok {
-				b.logger.Errorf("unable to find backend Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
-				continue trafficSplit
-			}
-
-			// As required by the SMI specification, backends must expose at least the same ports as the Service on
-			// which the TrafficSplit is.
-			for _, svcPort := range svc.Ports {
-				var portFound bool
-				for _, backendPort := range backendSvc.Ports {
-					if svcPort.Port == backendPort.Port {
-						portFound = true
-						break
-					}
-				}
-
-				if !portFound {
-					b.logger.Errorf("port %d must be exposed by Service %s/%s in order to be used as a TrafficSplit %s/%s backend",
-						svcPort.Port,
-						backendSvc.Namespace, backendSvc.Name,
-						trafficSplit.Namespace, trafficSplit.Name)
-					continue trafficSplit
+		// As required by the SMI specification, backends must expose at least the same ports as the Service on
+		// which the TrafficSplit is.
+		for _, svcPort := range svc.Ports {
+			var portFound bool
+			for _, backendPort := range backendSvc.Ports {
+				if svcPort.Port == backendPort.Port {
+					portFound = true
+					break
 				}
 			}
 
-			backends[i] = TrafficSplitBackend{
-				Weight:  backend.Weight,
-				Service: backendSvc,
+			if !portFound {
+				return fmt.Errorf("port %d must be exposed by Service %s/%s in order to be used as a TrafficSplit %s/%s backend",
+					svcPort.Port,
+					backendSvc.Namespace, backendSvc.Name,
+					trafficSplit.Namespace, trafficSplit.Name)
 			}
-			backendSvc.BackendOf = append(backendSvc.BackendOf, ts)
-
 		}
-		ts.Backends = backends
-		svc.TrafficSplits = append(svc.TrafficSplits, ts)
+
+		backends[i] = TrafficSplitBackend{
+			Weight:  backend.Weight,
+			Service: backendSvc,
+		}
+		backendSvc.BackendOf = append(backendSvc.BackendOf, ts)
+
+	}
+	ts.Backends = backends
+	svc.TrafficSplits = append(svc.TrafficSplits, ts)
+
+	return nil
+}
+
+func (b *Builder) evaluateTrafficSplits(topology *Topology) {
+	for _, trafficSplit := range topology.TrafficSplits {
+		if err := b.evaluateTrafficSplit(topology, trafficSplit); err != nil {
+			b.logger.Errorf("Unable to build TrafficSplit: %v", err)
+		}
 	}
 }
 
@@ -266,6 +274,10 @@ func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarge
 
 		srcPods := make([]*Pod, len(pods))
 		for i, pod := range pods {
+			if pod.Status.PodIP == "" {
+				continue
+			}
+
 			srcPods[i] = getOrCreatePod(t, pod)
 		}
 
