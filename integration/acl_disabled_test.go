@@ -109,7 +109,7 @@ func (s *ACLDisabledSuite) TestTrafficSplit(c *check.C) {
 
 func (s *ACLDisabledSuite) waitForPods(c *check.C, pods []string) {
 	for _, pod := range pods {
-		err := s.try.WaitPodIPAssigned(pod, "ns", 20*time.Second)
+		err := s.try.WaitPodIPAssigned(pod, "ns", 30*time.Second)
 		c.Assert(err, checker.IsNil)
 	}
 }

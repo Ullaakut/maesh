@@ -6,6 +6,8 @@ import (
 	"regexp"
 	"time"
 
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
 	"github.com/go-check/check"
 	checker "github.com/vdemeester/shakers"
 )
@@ -44,7 +46,7 @@ func (s *ACLEnabledSuite) TestHTTPTrafficTarget(c *check.C) {
 		"exec", "-i", "pod/client-a", "-n", "ns", "--",
 		"curl", "--fail", "-sw", "'%{http_code}'", "server.ns.maesh:8080/api",
 	}
-	output, err := s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 10*time.Second)
+	output, err := s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 20*time.Second)
 	c.Assert(err, checker.IsNil)
 	c.Assert(output, checker.Contains, "'200'")
 
@@ -53,7 +55,7 @@ func (s *ACLEnabledSuite) TestHTTPTrafficTarget(c *check.C) {
 		"exec", "-i", "pod/client-b", "-n", "ns", "--",
 		"curl", "-sw", "'%{http_code}'", "server.ns.maesh:8080/api",
 	}
-	output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientB, 10*time.Second)
+	output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientB, 20*time.Second)
 	c.Assert(err, checker.IsNil)
 	c.Assert(output, checker.Contains, "Forbidden'403'")
 
@@ -62,7 +64,7 @@ func (s *ACLEnabledSuite) TestHTTPTrafficTarget(c *check.C) {
 		"exec", "-i", "pod/client-a", "-n", "ns", "--",
 		"curl", "-sw", "'%{http_code}'", "server.ns.maesh:8080",
 	}
-	output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 10*time.Second)
+	output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 20*time.Second)
 	c.Assert(err, checker.IsNil)
 	c.Assert(output, checker.Contains, "Forbidden'403'")
 }
@@ -71,25 +73,39 @@ func (s *ACLEnabledSuite) TestTCPTrafficTarget(c *check.C) {
 	s.createResources(c, "resources/acl/enabled/tcp-traffic-target")
 	defer s.deleteResources(c, "resources/acl/enabled/tcp-traffic-target", true)
 
-	s.waitForPods(c, []string{"client-a", "client-b", "server"})
+	s.waitForPods(c, []string{"client", "server"})
 
-	// Make sure client-a can hit the server.
+	// Make sure client can hit the server.
 	curlFromClientA := []string{
-		"exec", "-i", "pod/client-a", "-n", "ns", "--",
-		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080",
+		"exec", "-i", "pod/client", "-n", "ns", "--",
+		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080 | grep 'Hostname: server'",
 	}
-	output, err := s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 10*time.Second)
+	_, err := s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 20*time.Second)
 	c.Assert(err, checker.IsNil)
-	c.Assert(output, checker.Contains, "Hostname: server")
+}
 
-	// FIXME: Uncomment the following assertions when it will be possible whitelist incoming connection to a TCP service
-	//// Make sure client-b can't hit the server.
-	//curlFromClientB := []string{
-	//	"exec", "-i", "pod/client-b", "-n", "ns", "--",
-	//	"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080",
-	//}
-	//output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientB, 10*time.Second)
-	//c.Assert(err, checker.IsNil)
+func (s *ACLEnabledSuite) printRawData(c *check.C, timeout time.Duration) {
+	proxies, err := s.client.GetKubernetesClient().CoreV1().Pods(maeshNamespace).List(metav1.ListOptions{
+		LabelSelector: "component=maesh-mesh",
+	})
+	c.Assert(err, checker.IsNil)
+	c.Assert(len(proxies.Items), checker.GreaterThan, 0)
+
+	proxyIP := proxies.Items[0].Status.PodIP
+	fmt.Println("proxyIP!", proxyIP)
+
+	args := []string{
+		"exec", "-it",
+		"pod/client",
+		"-n", "ns",
+		"--",
+		"curl",
+		fmt.Sprintf("http://%s:8080/api/rawdata", proxyIP),
+	}
+
+	output, err := s.try.WaitCommandExecuteReturn("kubectl", args, timeout)
+	c.Log(output)
+	c.Assert(err, checker.IsNil)
 }
 
 func (s *ACLEnabledSuite) TestTrafficSplit(c *check.C) {
@@ -133,7 +149,7 @@ func (s *ACLEnabledSuite) TestTrafficSplit(c *check.C) {
 			return fmt.Errorf("expected to hit 2 different backends, got %d", len(backendsHit))
 		}
 		return nil
-	}, 10*time.Second)
+	}, 30*time.Second)
 	c.Assert(err, checker.IsNil)
 
 	// Make sure client-b can't hit the server.
@@ -141,12 +157,11 @@ func (s *ACLEnabledSuite) TestTrafficSplit(c *check.C) {
 	output, err = s.kubectlExec("ns", "client-b", "curl", "-sw", "'%{http_code}'", "server.ns.maesh:8080")
 	c.Assert(err, checker.IsNil)
 	c.Assert(output, checker.Contains, "Forbidden'403'")
-
 }
 
 func (s *ACLEnabledSuite) waitForPods(c *check.C, pods []string) {
 	for _, pod := range pods {
-		err := s.try.WaitPodIPAssigned(pod, "ns", 20*time.Second)
+		err := s.try.WaitPodIPAssigned(pod, "ns", 30*time.Second)
 		c.Assert(err, checker.IsNil)
 	}
 }

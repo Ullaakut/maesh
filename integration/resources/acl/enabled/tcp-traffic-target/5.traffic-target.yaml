@@ -19,5 +19,5 @@ specs:
     name: tcp-route
 sources:
   - kind: ServiceAccount
-    name: client-a
+    name: client
     namespace: ns

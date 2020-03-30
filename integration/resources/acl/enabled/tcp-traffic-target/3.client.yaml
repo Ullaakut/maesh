@@ -1,27 +1,12 @@
 apiVersion: v1
 kind: Pod
 metadata:
-  name: client-a
+  name: client
   namespace: ns
 spec:
-  serviceAccountName: client-a
+  serviceAccountName: client
   containers:
-    - name: client-a
-      image: giantswarm/tiny-tools:3.9
-      command:
-        - "sleep"
-        - "36000"
-
----
-apiVersion: v1
-kind: Pod
-metadata:
-  name: client-b
-  namespace: ns
-spec:
-  serviceAccountName: client-b
-  containers:
-    - name: client-b
+    - name: client
       image: giantswarm/tiny-tools:3.9
       command:
         - "sleep"

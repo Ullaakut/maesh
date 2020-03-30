@@ -52,9 +52,8 @@ func NewBuilder(
 	}
 }
 
-// Build builds the topoly
-// some errors aren't considered as blocking (a traffic split which refer an unknown service for example).
-// we doing so to not block all the dynamic configuration build and still be able to update loadbalancer and router.
+// Build builds a graph representing the possible interactions between Pods and Services based on the current state
+// of the kubernetes cluster.
 func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	topology := NewTopology()
 
@@ -75,7 +74,7 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 		return nil, fmt.Errorf("unable to gather TCPRoutes: %w", err)
 	}
 
-	// Build the graph.
+	// Build the topology based on the gathered objects.
 	if err := b.evaluateTrafficTargets(topology); err != nil {
 		return nil, fmt.Errorf("unable to evaluate TrafficTargets: %w", err)
 	}
