@@ -41,7 +41,7 @@ func (s *ACLDisabledSuite) TestHTTPService(c *check.C) {
 
 	args := []string{
 		"exec", "-it", "pod/client", "-n", "ns", "--",
-		"curl", "server.ns.maesh:8080",
+		"curl", "--fail", "server.ns.maesh:8080",
 	}
 
 	err := s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
@@ -56,7 +56,7 @@ func (s *ACLDisabledSuite) TestTCPService(c *check.C) {
 
 	args := []string{
 		"exec", "-it", "pod/client", "-n", "ns", "--",
-		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080",
+		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080 | grep 'Hostname: server'",
 	}
 
 	err := s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
