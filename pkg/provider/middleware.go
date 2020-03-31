@@ -15,11 +15,11 @@ type MiddlewareBuilder interface {
 	Build(svc *topology.Service) (*dynamic.Middleware, error)
 }
 
-// DefaultMiddlewareBuilder build middlewares.
-type DefaultMiddlewareBuilder struct{}
+// AnnotationBasedMiddlewareBuilder build middlewares from service annotations.
+type AnnotationBasedMiddlewareBuilder struct{}
 
 // Build builds middlewares for the given service.
-func (b *DefaultMiddlewareBuilder) Build(svc *topology.Service) (*dynamic.Middleware, error) {
+func (b *AnnotationBasedMiddlewareBuilder) Build(svc *topology.Service) (*dynamic.Middleware, error) {
 	var middleware dynamic.Middleware
 
 	// Build circuit-breaker middleware.

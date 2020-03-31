@@ -2,7 +2,7 @@
 
 The configuration for maesh is broken down into two parts: the static configuration, and the dynamic configuration.
 The static configuration is configured when the maesh service mesh is installed,
-and is configured via the values.yaml file in the helm install.
+and is configured via the `values.yaml` file in the helm install.
 
 ## Static configuration
 
@@ -15,22 +15,32 @@ and is configured via the values.yaml file in the helm install.
 
 - Tracing can be enabled.
 
-- Service Mesh Interface (SMI) mode can be enabled.
-    This configures maesh to run in SMI mode, where access and routes are explicitly enabled.
-    Note: By default, all routes and access is denied.
-    Please see the [SMI Specification](https://github.com/deislabs/smi-spec) for more information
-
+- Access-Control List (ACL) mode can be enabled.
+    This configures maesh to run in ACL mode, where all traffic become forbidden unless explicitly allowed via 
+    a SMI [TrafficTarget](https://github.com/servicemeshinterface/smi-spec/blob/master/traffic-access-control.md).
+    Please see the [SMI Specification](https://github.com/servicemeshinterface/smi-spec/blob/master/traffic-access-control.md) for more information
+    
 ## Dynamic configuration
 
-Dynamic configuration can be provided to Maesh using either annotations on kubernetes services (default mode) or SMI resources if Maesh is installed with [SMI enabled](./install.md#service-mesh-interface).
+Dynamic configuration can be provided to Maesh using annotations on kubernetes services and via SMI objects. 
 
-### With Kubernetes Services
+ | Features              | ACL disabled | ACL enabled |
+ |-----------------------|--------------|-------------|
+ | Traffic-Type          | ✔            | ✔           |
+ | Scheme                | ✔            | ✔           |
+ | Retry                 | ✔            | ✔           |
+ | Circuit-Breaker       | ✔            | ✔           |
+ | Rate-Limit            | ✔            | ✔           |
+ | Traffic-Split (SMI)   | ✔            | ✔           |
+ | Traffic-Target (SMI)  | ✘            | ✔           |
+
+### Kubernetes Services Annotations
+
+Annotations on services give the ability to configure how it will behave. 
 
 #### Traffic type
 
-Annotations on services are the main way to configure maesh behavior.
-
-The service mode can be enabled by using the following annotation:
+The traffic type can be configured by using the following annotation:
 
 ```yaml
 maesh.containo.us/traffic-type: "http"
@@ -61,7 +71,7 @@ Retries can be enabled by using the following annotation:
 maesh.containo.us/retry-attempts: "2"
 ```
 
-This annotation sets the number of retry attempts that maesh will make if a network error occurrs.
+This annotation sets the number of retry attempts that maesh will make if a network error occurs.
 Please note that this value is a string, and needs to be quoted.
 
 #### Circuit breaker
@@ -92,7 +102,7 @@ Please note that this value is a string, and needs to be quoted.
 
 Further details about the rate limiting can be found [here](https://docs.traefik.io/v2.0/middlewares/ratelimit/#configuration-options)
 
-### With Service Mesh Interface
+### Service Mesh Interface
 
 #### Access Control
 

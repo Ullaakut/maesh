@@ -66,7 +66,7 @@ func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable 
 		defaultTrafficType: defaultTrafficType,
 		maeshNamespace:     maeshNamespace,
 		podLister:          podLister,
-		middlewareBuilder:  &DefaultMiddlewareBuilder{},
+		middlewareBuilder:  &AnnotationBasedMiddlewareBuilder{},
 		topologyBuilder:    topologyBuilder,
 		tcpStateTable:      tcpStateTable,
 		ignored:            ignored,

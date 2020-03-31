@@ -59,18 +59,20 @@ If you use a cluster domain other than `cluster.local` set it by using the `clus
 helm install maesh maesh/maesh --set clusterDomain=my.custom.domain.com
 ```
 
-## Service Mesh Interface
+## Access-Control List
+
+By default Maesh does not restrict traffic between pods and services. However, some scenarios requires more control
+over who can talk to who. The Access-control List mode (ACL) allows to define a set of rules to explicitly allow 
+traffic between different resources.
+
+To enable ACL, install Maesh in ACL mode by setting the `acl` helm chart option to true.
+
+```bash
+helm install maesh --namespace=maesh maesh/maesh --set acl=true
+```
 
 Maesh supports the [SMI specification](https://smi-spec.io/) which defines a set of custom resources
 to provide a fine-grained control over instrumentation, routing and access control of east-west communications.
-
-To enable SMI, install maesh in SMI mode by setting the `smi.enable` helm chart option to true.
-
-```bash
-helm install maesh --namespace=maesh maesh/maesh --set smi.enable=true`
-```
-
-- The `smi.enable` option makes Maesh process SMI resources.
 
 !!! Note CRDs
     Helm v3 automatically will install the CRDs in the `/crds` directory.
