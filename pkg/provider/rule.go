@@ -28,6 +28,7 @@ func buildTrafficTargetRule(tt *topology.ServiceTrafficTarget) string {
 			// Handle Method filtering.
 			if len(match.Methods) > 0 {
 				var matchAll bool
+
 				for _, m := range match.Methods {
 					if m == "*" {
 						matchAll = true
@@ -47,6 +48,7 @@ func buildTrafficTargetRule(tt *topology.ServiceTrafficTarget) string {
 				if len(matchParts) > 1 {
 					matchCond = fmt.Sprintf("(%s)", matchCond)
 				}
+
 				orRules = append(orRules, matchCond)
 			}
 		}
@@ -67,6 +69,7 @@ func buildHTTPRuleFromTrafficTarget(tt *topology.ServiceTrafficTarget) string {
 	if ttRule != "" {
 		return fmt.Sprintf("(%s) && (%s)", httpRule, ttRule)
 	}
+
 	return httpRule
 }
 
@@ -78,6 +81,7 @@ func buildHTTPRuleFromTrafficTargetIndirect(tt *topology.ServiceTrafficTarget) s
 	if ttRule != "" {
 		return fmt.Sprintf("(%s) && (%s) && %s", svcRule, ttRule, indirectRule)
 	}
+
 	return fmt.Sprintf("(%s) && %s", svcRule, indirectRule)
 }
 

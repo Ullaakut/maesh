@@ -1,21 +1,13 @@
 package integration
 
 import (
-	"bytes"
-	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"log"
 	"net"
-	"net/http"
 	"os"
 	"os/exec"
 	"path"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -23,10 +15,8 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"github.com/containous/maesh/integration/try"
 	"github.com/containous/maesh/pkg/k8s"
-	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	"github.com/containous/traefik/v2/pkg/safe"
 	"github.com/go-check/check"
-	"github.com/pmezard/go-difflib/difflib"
 	checker "github.com/vdemeester/shakers"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -41,7 +31,6 @@ var (
 	k3sVersion            = "v0.10.1"
 	maeshNamespace        = "maesh"
 	maeshBinary           = "../dist/maesh"
-	maeshAPIPort          = 9000
 	testNamespace         = "test"
 	kubectlCreateWaitTime = 1 * time.Second
 )
@@ -248,13 +237,11 @@ func (s *BaseSuite) stopK3s() {
 
 func (s *BaseSuite) kubectlExec(ns, name string, cmdArgs ...string) (string, error) {
 	args := []string{"exec", "-i", name, "-n", ns, "--"}
-
-	for _, arg := range cmdArgs {
-		args = append(args, arg)
-	}
+	args = append(args, cmdArgs...)
 
 	cmd := exec.Command("kubectl", args...)
 	cmd.Env = os.Environ()
+
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("unable execute kubectl exec %s - output %s: %v", strings.Join(args, " "), output, err)
@@ -401,124 +388,6 @@ func (s *BaseSuite) getToolsPodMaesh(c *check.C) *corev1.Pod {
 	return &podList.Items[0]
 }
 
-func (s *BaseSuite) testConfiguration(c *check.C, path string) {
-	err := try.GetRequest(fmt.Sprintf("http://127.0.0.1:%d/api/configuration/current", maeshAPIPort), 20*time.Second, try.BodyContains(`"service":"readiness"`))
-	c.Assert(err, checker.IsNil)
-
-	expectedJSON := filepath.FromSlash(path)
-
-	var buf bytes.Buffer
-
-	err = try.GetRequest(fmt.Sprintf("http://127.0.0.1:%d/api/configuration/current", maeshAPIPort), 10*time.Second, try.StatusCodeIs(http.StatusOK), matchesConfig(expectedJSON, &buf))
-	if err != nil {
-		c.Error(err)
-	}
-}
-
-func (s *BaseSuite) testConfigurationWithReturn(c *check.C, path string) *dynamic.Configuration {
-	err := try.GetRequest(fmt.Sprintf("http://127.0.0.1:%d/api/configuration/current", maeshAPIPort), 20*time.Second, try.BodyContains(`"service":"readiness"`))
-	c.Assert(err, checker.IsNil)
-
-	expectedJSON := filepath.FromSlash(path)
-
-	var buf bytes.Buffer
-
-	err = try.GetRequest(fmt.Sprintf("http://127.0.0.1:%d/api/configuration/current", maeshAPIPort), 10*time.Second, try.StatusCodeIs(http.StatusOK), matchesConfig(expectedJSON, &buf))
-	if err != nil {
-		c.Error(err)
-	}
-
-	var result *dynamic.Configuration
-
-	err = json.Unmarshal(buf.Bytes(), &result)
-	c.Assert(err, checker.IsNil)
-
-	return result
-}
-
-func matchesConfig(wantConfig string, buf *bytes.Buffer) try.ResponseCondition {
-	return func(res *http.Response) error {
-		body, err := ioutil.ReadAll(res.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response body: %s", err)
-		}
-
-		if err = res.Body.Close(); err != nil {
-			return err
-		}
-
-		var obtained dynamic.Configuration
-
-		err = json.Unmarshal(body, &obtained)
-		if err != nil {
-			return err
-		}
-
-		if buf != nil {
-			buf.Reset()
-
-			if _, err = io.Copy(buf, bytes.NewReader(body)); err != nil {
-				return err
-			}
-		}
-
-		got, err := json.MarshalIndent(obtained, "", "    ")
-		if err != nil {
-			return err
-		}
-
-		expected, err := ioutil.ReadFile(wantConfig)
-		if err != nil {
-			return err
-		}
-
-		// The pods IPs are dynamic, so we cannot predict them,
-		// which is why we have to ignore them in the comparison.
-		rxURL := regexp.MustCompile(`"(url|address)":\s+(".*")`)
-		sanitizedExpected := rxURL.ReplaceAll(expected, []byte(`"$1": "XXXX"`))
-		sanitizedGot := rxURL.ReplaceAll(got, []byte(`"$1": "XXXX"`))
-
-		rxHostRule := regexp.MustCompile("Host\\(\\`(\\d+)\\.(\\d+)\\.(\\d+)\\.(\\d+)\\`\\)")
-		sanitizedExpected = rxHostRule.ReplaceAll(sanitizedExpected, []byte("Host(`XXXX`)"))
-		sanitizedGot = rxHostRule.ReplaceAll(sanitizedGot, []byte("Host(`XXXX`)"))
-
-		rxServerStatus := regexp.MustCompile(`"http://.*?":\s+(".*")`)
-		sanitizedExpected = rxServerStatus.ReplaceAll(sanitizedExpected, []byte(`"http://XXXX": $1`))
-		sanitizedGot = rxServerStatus.ReplaceAll(sanitizedGot, []byte(`"http://XXXX": $1`))
-
-		// The tcp entrypoint assignments are dynamic, so we cannot predict them,
-		// which is why we have to ignore them in the comparison.
-		rxTCPEntrypoints := regexp.MustCompile(`"tcp-1000(\d)"`)
-		sanitizedExpected = rxTCPEntrypoints.ReplaceAll(sanitizedExpected, []byte(`"tcp-1000X"`))
-		sanitizedGot = rxTCPEntrypoints.ReplaceAll(sanitizedGot, []byte(`"tcp-1000X"`))
-
-		// The IPWhiteList source ranges are dynamic, so we cannot predict them,
-		// which is why we have to ignore them in the comparison.
-		rxIPWhiteList := regexp.MustCompile(`"ipWhiteList":\s*{\s*"sourceRange":\s*\[(\s*"((\d+)\.(\d+)\.(\d+)\.(\d+))",?)*\s*\]\s*}`)
-		sanitizedExpected = rxIPWhiteList.ReplaceAll(sanitizedExpected, []byte(`"ipWhiteList":{"sourceRange":["XXXX"]}`))
-		sanitizedGot = rxIPWhiteList.ReplaceAll(sanitizedGot, []byte(`"ipWhiteList":{"sourceRange":["XXXX"]}`))
-
-		if bytes.Equal(sanitizedExpected, sanitizedGot) {
-			return nil
-		}
-
-		diff := difflib.UnifiedDiff{
-			FromFile: "Expected",
-			A:        difflib.SplitLines(string(sanitizedExpected)),
-			ToFile:   "Got",
-			B:        difflib.SplitLines(string(sanitizedGot)),
-			Context:  3,
-		}
-
-		text, err := difflib.GetUnifiedDiffString(diff)
-		if err != nil {
-			return err
-		}
-
-		return errors.New(text)
-	}
-}
-
 func (s *BaseSuite) digHost(c *check.C, source, namespace, destination string) {
 	// Dig the host, with a short response for the A record
 	argSlice := []string{
@@ -530,14 +399,4 @@ func (s *BaseSuite) digHost(c *check.C, source, namespace, destination string) {
 	c.Log(fmt.Sprintf("Dig %s: %s", destination, strings.TrimSpace(output)))
 	IP := net.ParseIP(strings.TrimSpace(output))
 	c.Assert(IP, checker.NotNil)
-}
-
-func contains(s []string, x string) bool {
-	for _, v := range s {
-		if x == v {
-			return true
-		}
-	}
-
-	return false
 }

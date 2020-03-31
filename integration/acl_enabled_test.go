@@ -89,7 +89,7 @@ func (s *ACLEnabledSuite) TestTrafficSplit(c *check.C) {
 		}
 
 		// Make sure each call ended up on a different backend.
-		backendHostReg := regexp.MustCompile("Host: server-v([12])\\.ns\\.maesh:8080")
+		backendHostReg := regexp.MustCompile(`Host: server-v([12])\.ns\.maesh:8080`)
 		backendsHit := make(map[string]bool)
 
 		matchFstCall := backendHostReg.FindStringSubmatch(fstCall)

@@ -476,12 +476,7 @@ func TestTopologyBuilder_BuildTrafficTargetMultipleSourcesAndDestinations(t *tes
 
 // createBuilder initialize the different k8s factories, start them, initialize listers and create
 // a new topology.Builder.
-func createBuilder(
-	k8sClient k8s.Interface,
-	smiAccessClient accessclient.Interface,
-	smiSpecClient specsclient.Interface,
-	smiSplitClient splitclient.Interface) (*topology.Builder, error) {
-
+func createBuilder(k8sClient k8s.Interface, smiAccessClient accessclient.Interface, smiSpecClient specsclient.Interface, smiSplitClient splitclient.Interface) (*topology.Builder, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 
@@ -510,16 +505,19 @@ func createBuilder(
 			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
 		}
 	}
+
 	for t, ok := range accessFactory.WaitForCacheSync(ctx.Done()) {
 		if !ok {
 			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
 		}
 	}
+
 	for t, ok := range splitFactory.WaitForCacheSync(ctx.Done()) {
 		if !ok {
 			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
 		}
 	}
+
 	for t, ok := range specsFactory.WaitForCacheSync(ctx.Done()) {
 		if !ok {
 			return nil, fmt.Errorf("timed out while waiting for cache sync: %s", t.String())
@@ -665,13 +663,7 @@ func createHTTPMatch(name string, methods []string, pathPrefix string) spec.HTTP
 	}
 }
 
-func createService(
-	ns, name string,
-	annotations map[string]string,
-	targetPorts []corev1.ServicePort,
-	selector map[string]string,
-	clusterIP string) *corev1.Service {
-
+func createService(ns, name string, annotations map[string]string, targetPorts []corev1.ServicePort, selector map[string]string, clusterIP string) *corev1.Service {
 	return &corev1.Service{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Service",
@@ -691,46 +683,7 @@ func createService(
 	}
 }
 
-func createEndpoints(svc *corev1.Service, pods []*corev1.Pod) *corev1.Endpoints {
-	ports := make([]corev1.EndpointPort, len(svc.Spec.Ports))
-	for i, port := range svc.Spec.Ports {
-		ports[i] = corev1.EndpointPort{
-			Name:     port.Name,
-			Port:     port.TargetPort.IntVal,
-			Protocol: port.Protocol,
-		}
-	}
-
-	addresses := make([]corev1.EndpointAddress, len(pods))
-	for i, pod := range pods {
-		addresses[i] = corev1.EndpointAddress{
-			IP: pod.Status.PodIP,
-		}
-	}
-
-	return &corev1.Endpoints{
-		TypeMeta: metav1.TypeMeta{
-			Kind:       "Endpoints",
-			APIVersion: "apps/v1",
-		},
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      svc.Name,
-			Namespace: svc.Namespace,
-		},
-		Subsets: []corev1.EndpointSubset{
-			{
-				Addresses: addresses,
-				Ports:     ports,
-			},
-		},
-	}
-}
-
-func createPod(ns, name string,
-	sa *corev1.ServiceAccount,
-	selector map[string]string,
-	podIP string) *corev1.Pod {
-
+func createPod(ns, name string, sa *corev1.ServiceAccount, selector map[string]string, podIP string) *corev1.Pod {
 	return &corev1.Pod{
 		TypeMeta: metav1.TypeMeta{
 			Kind:       "Pod",

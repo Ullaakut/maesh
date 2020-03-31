@@ -62,15 +62,19 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	if err := b.gatherServices(topology, ignored); err != nil {
 		return nil, fmt.Errorf("unable to gather Services: %w", err)
 	}
+
 	if err := b.gatherTrafficTargets(topology, ignored); err != nil {
 		return nil, fmt.Errorf("unable to gather TrafficTargets: %w", err)
 	}
+
 	if err := b.gatherTrafficSplits(topology, ignored); err != nil {
 		return nil, fmt.Errorf("unable to gather TrafficSplits: %w", err)
 	}
+
 	if err := b.gatherHTTPRouteGroups(topology, ignored); err != nil {
 		return nil, fmt.Errorf("unable to gather HTTPRouteGroups: %w", err)
 	}
+
 	if err := b.gatherTCPRoutes(topology, ignored); err != nil {
 		return nil, fmt.Errorf("unable to gather TCPRoutes: %w", err)
 	}
@@ -79,6 +83,7 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	if err := b.evaluateTrafficTargets(topology); err != nil {
 		return nil, fmt.Errorf("unable to evaluate TrafficTargets: %w", err)
 	}
+
 	b.evaluateTrafficSplits(topology)
 
 	return topology, nil
@@ -98,6 +103,7 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	if err != nil {
 		return fmt.Errorf("unable to list Pods: %w", err)
 	}
+
 	podsBySa := b.groupPodsByServiceAccount(pods)
 
 	for _, trafficTarget := range topology.TrafficTargets {
@@ -121,17 +127,20 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 
 		for service, pods := range podsBySvc {
 			svcKey := NameNamespace{service.Name, service.Namespace}
+
 			svc, ok := topology.Services[svcKey]
 			if !ok {
 				return fmt.Errorf("unable to find Service %s/%s", service.Namespace, service.Name)
 			}
 
-			// Find out who are the destination pods.
 			destPods := make([]*Pod, len(pods))
+
+			// Find out who are the destination pods.
 			for i, pod := range pods {
 				if pod.Status.PodIP == "" {
 					continue
 				}
+
 				destPods[i] = getOrCreatePod(topology, pod)
 			}
 
@@ -191,6 +200,7 @@ func (b *Builder) evaluateTrafficSplits(topology *Topology) {
 // - Attach the TrafficSplit to the different services (service and backends)
 func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha2.TrafficSplit) error {
 	svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
+
 	svc, ok := topology.Services[svcKey]
 	if !ok {
 		return fmt.Errorf("unable to find root Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
@@ -203,8 +213,10 @@ func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha
 	}
 
 	backends := make([]TrafficSplitBackend, len(trafficSplit.Spec.Backends))
+
 	for i, backend := range trafficSplit.Spec.Backends {
 		backendSvcKey := NameNamespace{backend.Service, trafficSplit.Namespace}
+
 		backendSvc, ok := topology.Services[backendSvcKey]
 		if !ok {
 			return fmt.Errorf("unable to find backend Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
@@ -214,6 +226,7 @@ func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha
 		// which the TrafficSplit is.
 		for _, svcPort := range svc.Ports {
 			var portFound bool
+
 			for _, backendPort := range backendSvc.Ports {
 				if svcPort.Port == backendPort.Port {
 					portFound = true
@@ -233,9 +246,10 @@ func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha
 			Weight:  backend.Weight,
 			Service: backendSvc,
 		}
-		backendSvc.BackendOf = append(backendSvc.BackendOf, ts)
 
+		backendSvc.BackendOf = append(backendSvc.BackendOf, ts)
 	}
+
 	ts.Backends = backends
 	svc.TrafficSplits = append(svc.TrafficSplits, ts)
 
@@ -278,9 +292,10 @@ func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarge
 
 	for i, source := range tt.Sources {
 		srcSaKey := NameNamespace{source.Name, source.Namespace}
-		pods := podsBySa[srcSaKey]
 
+		pods := podsBySa[srcSaKey]
 		srcPods := make([]*Pod, len(pods))
+
 		for i, pod := range pods {
 			if pod.Status.PodIP == "" {
 				continue
@@ -325,62 +340,82 @@ func (b *Builder) buildTrafficTargetSpecs(topology *Topology, tt *access.Traffic
 	var trafficSpecs []TrafficSpec
 
 	for _, s := range tt.Specs {
-		var trafficSpec TrafficSpec
-
 		switch s.Kind {
 		case "HTTPRouteGroup":
-			key := NameNamespace{s.Name, tt.Namespace}
-			httpRouteGroup, ok := topology.HTTPRouteGroups[key]
-			if !ok {
-				return []TrafficSpec{}, fmt.Errorf("unable to find HTTPRouteGroup %s/%s", tt.Namespace, s.Name)
+			trafficSpec, err := b.buildHTTPRouteGroup(topology, tt.Namespace, s)
+			if err != nil {
+				return []TrafficSpec{}, err
 			}
 
-			var httpMatches []*spec.HTTPMatch
-			if len(s.Matches) == 0 {
-				httpMatches = make([]*spec.HTTPMatch, len(httpRouteGroup.Matches))
-				for i, match := range httpRouteGroup.Matches {
-					m := match
-					httpMatches[i] = &m
-				}
-			} else {
-				for _, name := range s.Matches {
-					var found bool
-
-					for _, match := range httpRouteGroup.Matches {
-						found = match.Name == name
-
-						if found {
-							httpMatches = append(httpMatches, &match)
-							break
-						}
-					}
-
-					if !found {
-						return []TrafficSpec{}, fmt.Errorf("unable to find match %q in HTTPRouteGroup %s/%s", name, tt.Namespace, s.Name)
-					}
-				}
-			}
-
-			trafficSpec = TrafficSpec{
-				HTTPRouteGroup: httpRouteGroup,
-				HTTPMatches:    httpMatches,
-			}
+			trafficSpecs = append(trafficSpecs, trafficSpec)
 		case "TCPRoute":
-			key := NameNamespace{s.Name, tt.Namespace}
-			tcpRoute, ok := topology.TCPRoutes[key]
-			if !ok {
-				return []TrafficSpec{}, fmt.Errorf("unable to find TCPRoute %s/%s", tt.Namespace, s.Name)
+			trafficSpec, err := b.buildTCPRoute(topology, tt.Namespace, s)
+			if err != nil {
+				return []TrafficSpec{}, err
 			}
 
-			trafficSpec = TrafficSpec{TCPRoute: tcpRoute}
+			trafficSpecs = append(trafficSpecs, trafficSpec)
 		default:
 			return []TrafficSpec{}, fmt.Errorf("unknown spec type: %q", s.Kind)
 		}
-
-		trafficSpecs = append(trafficSpecs, trafficSpec)
 	}
 
 	return trafficSpecs, nil
+}
+
+func (b *Builder) buildHTTPRouteGroup(topology *Topology, ns string, s access.TrafficTargetSpec) (TrafficSpec, error) {
+	key := NameNamespace{s.Name, ns}
+
+	httpRouteGroup, ok := topology.HTTPRouteGroups[key]
+	if !ok {
+		return TrafficSpec{}, fmt.Errorf("unable to find HTTPRouteGroup %s/%s", ns, s.Name)
+	}
+
+	var httpMatches []*spec.HTTPMatch
+
+	if len(s.Matches) == 0 {
+		httpMatches = make([]*spec.HTTPMatch, len(httpRouteGroup.Matches))
+
+		for i, match := range httpRouteGroup.Matches {
+			m := match
+			httpMatches[i] = &m
+		}
+	} else {
+		for _, name := range s.Matches {
+			var found bool
+
+			for _, match := range httpRouteGroup.Matches {
+				found = match.Name == name
+
+				if found {
+					httpMatches = append(httpMatches, &match)
+					break
+				}
+			}
+
+			if !found {
+				return TrafficSpec{}, fmt.Errorf("unable to find match %q in HTTPRouteGroup %s/%s", name, ns, s.Name)
+			}
+		}
+	}
+
+	return TrafficSpec{
+		HTTPRouteGroup: httpRouteGroup,
+		HTTPMatches:    httpMatches,
+	}, nil
+}
+
+func (b *Builder) buildTCPRoute(topology *Topology, ns string, s access.TrafficTargetSpec) (TrafficSpec, error) {
+	key := NameNamespace{s.Name, ns}
+
+	tcpRoute, ok := topology.TCPRoutes[key]
+	if !ok {
+		return TrafficSpec{}, fmt.Errorf("unable to find TCPRoute %s/%s", ns, s.Name)
+	}
+
+	return TrafficSpec{
+		TCPRoute: tcpRoute,
+	}, nil
 }
 
 func (b *Builder) gatherServices(topology *Topology, ignored mk8s.IgnoreWrapper) error {
@@ -388,6 +423,7 @@ func (b *Builder) gatherServices(topology *Topology, ignored mk8s.IgnoreWrapper)
 	if err != nil {
 		return fmt.Errorf("unable to list Services: %w", err)
 	}
+
 	for _, svc := range services {
 		if ignored.IsIgnored(svc.ObjectMeta) {
 			continue
@@ -416,6 +452,7 @@ func (b *Builder) gatherHTTPRouteGroups(topology *Topology, ignored mk8s.IgnoreW
 	if err != nil {
 		return fmt.Errorf("unable to list HTTPRouteGroups: %w", err)
 	}
+
 	for _, httpRouteGroup := range httpRouteGroups {
 		if ignored.IsIgnored(httpRouteGroup.ObjectMeta) {
 			continue
@@ -433,6 +470,7 @@ func (b *Builder) gatherTCPRoutes(topology *Topology, ignored mk8s.IgnoreWrapper
 	if err != nil {
 		return fmt.Errorf("unable to list TCPRouteGroups: %w", err)
 	}
+
 	for _, tcpRoute := range tcpRoutes {
 		if ignored.IsIgnored(tcpRoute.ObjectMeta) {
 			continue
@@ -450,6 +488,7 @@ func (b *Builder) gatherTrafficTargets(topology *Topology, ignored mk8s.IgnoreWr
 	if err != nil {
 		return fmt.Errorf("unable to list TrafficTargets: %w", err)
 	}
+
 	for _, trafficTarget := range trafficTargets {
 		if ignored.IsIgnored(trafficTarget.ObjectMeta) {
 			continue
@@ -467,6 +506,7 @@ func (b *Builder) gatherTrafficSplits(topology *Topology, ignored mk8s.IgnoreWra
 	if err != nil {
 		return fmt.Errorf("unable to list TrafficSplits: %w", err)
 	}
+
 	for _, trafficSplit := range trafficSplits {
 		if ignored.IsIgnored(trafficSplit.ObjectMeta) {
 			continue

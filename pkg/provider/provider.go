@@ -89,59 +89,67 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 	}
 
 	for _, svc := range t.Services {
-		trafficType, err := p.getTrafficTypeAnnotation(svc)
-		if err != nil {
-			p.logger.Errorf("Unable to evaluate traffic-type annotation on service %s/%s: %v", svc.Namespace, svc.Name, err)
-			continue
-		}
-		scheme, err := getSchemeAnnotation(svc)
-		if err != nil {
-			p.logger.Errorf("Unable to evaluate scheme annotation on service %s/%s: %v", svc.Namespace, svc.Name, err)
-			continue
-		}
-
-		var middlewares []string
-
-		if trafficType == k8s.ServiceTypeHTTP {
-			middleware, err := p.middlewareBuilder.Build(svc)
-			if err != nil {
-				p.logger.Errorf("Unable to build middlewares for service %s/%s: %v", svc.Namespace, svc.Name, err)
-				continue
-			}
-			if middleware != nil {
-				middlewareKey := getMiddlewareKey(svc)
-				cfg.HTTP.Middlewares[middlewareKey] = middleware
-				middlewares = append(middlewares, middlewareKey)
-			}
-		}
-
-		if p.acl {
-			for _, tt := range svc.TrafficTargets {
-				if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares, maeshProxyIPs); err != nil {
-					p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-target %s: %v", svc.Namespace, svc.Name, tt.Name, err)
-					continue
-				}
-			}
-
-			if trafficType == k8s.ServiceTypeHTTP {
-				p.buildBlockAllRouters(cfg, svc)
-			}
-		} else {
-			if err := p.buildServicesAndRoutersForService(cfg, svc, scheme, trafficType, middlewares); err != nil {
-				p.logger.Errorf("Unable to build routers and services for service %s/%s: %v", svc.Namespace, svc.Name, err)
-				continue
-			}
-		}
-
-		for _, ts := range svc.TrafficSplits {
-			if err := p.buildServiceAndRoutersForTrafficSplits(cfg, ts, scheme, trafficType, middlewares); err != nil {
-				p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-split %s: %v", svc.Namespace, svc.Name, ts.Name, err)
-				continue
-			}
+		if err := p.buildConfigForService(cfg, svc, maeshProxyIPs); err != nil {
+			p.logger.Errorf("Unable to build config for service %s/%s: %w", svc.Namespace, svc.Name, err)
 		}
 	}
 
 	return cfg, nil
+}
+
+func (p *Provider) buildConfigForService(cfg *dynamic.Configuration, svc *topology.Service, maeshProxyIPs []string) error {
+	trafficType, err := p.getTrafficTypeAnnotation(svc)
+	if err != nil {
+		return fmt.Errorf("unable to evaluate traffic-type annotation: %w", err)
+	}
+
+	scheme, err := getSchemeAnnotation(svc)
+	if err != nil {
+		return fmt.Errorf("unable to evaluate scheme annotation: %w", err)
+	}
+
+	var middlewares []string
+
+	if trafficType == k8s.ServiceTypeHTTP {
+		middleware, err := p.middlewareBuilder.Build(svc)
+		if err != nil {
+			return fmt.Errorf("unable to build middlewares: %w", err)
+		}
+
+		if middleware != nil {
+			middlewareKey := getMiddlewareKey(svc)
+			cfg.HTTP.Middlewares[middlewareKey] = middleware
+
+			middlewares = append(middlewares, middlewareKey)
+		}
+	}
+
+	if p.acl {
+		for _, tt := range svc.TrafficTargets {
+			if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares, maeshProxyIPs); err != nil {
+				p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-target %s: %v", svc.Namespace, svc.Name, tt.Name, err)
+				continue
+			}
+		}
+
+		if trafficType == k8s.ServiceTypeHTTP {
+			p.buildBlockAllRouters(cfg, svc)
+		}
+	} else {
+		err := p.buildServicesAndRoutersForService(cfg, svc, scheme, trafficType, middlewares)
+		if err != nil {
+			return fmt.Errorf("unable to build routers and services: %w", err)
+		}
+	}
+
+	for _, ts := range svc.TrafficSplits {
+		if err := p.buildServiceAndRoutersForTrafficSplits(cfg, ts, scheme, trafficType, middlewares); err != nil {
+			p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-split %s: %v", svc.Namespace, svc.Name, ts.Name, err)
+			continue
+		}
+	}
+
+	return nil
 }
 
 func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration, svc *topology.Service, scheme, trafficType string, middlewares []string) error {
@@ -190,6 +198,7 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 		cfg.HTTP.Middlewares[whitelistMiddlewareDirectKey] = whitelistMiddleware
 
 		rule := buildHTTPRuleFromTrafficTarget(tt)
+
 		for portID, svcPort := range tt.Destination.Ports {
 			entrypoint, err := p.buildHTTPEntrypoint(portID)
 			if err != nil {
@@ -247,6 +256,7 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 		for portID, svcPort := range ts.Service.Ports {
 			backendSvcs := make([]dynamic.WRRService, len(ts.Backends))
+
 			for i, backend := range ts.Backends {
 				key := getServiceRouterKeyFromTrafficSplitBackend(ts, svcPort.Port, backend)
 				// This is unclear in SMI's specification if port mapping should be enforced between the Service and the
@@ -270,8 +280,10 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 		}
 	case k8s.ServiceTypeTCP:
 		tcpRule := buildTCPRouterRule()
+
 		for _, svcPort := range ts.Service.Ports {
 			backendSvcs := make([]dynamic.TCPWRRService, len(ts.Backends))
+
 			for i, backend := range ts.Backends {
 				key := getServiceRouterKeyFromTrafficSplitBackend(ts, svcPort.Port, backend)
 				cfg.TCP.Services[key] = buildTCPSplitTrafficBackendService(backend, svcPort.TargetPort.IntVal)
@@ -305,13 +317,13 @@ func (p *Provider) getMaeshProxyIPs() ([]string, error) {
 		return []string{}, err
 	}
 
-	selector := labels.Everything().Add(*req)
-	pods, err := p.podLister.Pods(p.maeshNamespace).List(selector)
+	pods, err := p.podLister.Pods(p.maeshNamespace).List(labels.Everything().Add(*req))
 	if err != nil {
 		return []string{}, fmt.Errorf("unable to get Maesh Proxy pods: %w", err)
 	}
 
 	proxyIPs := make([]string, len(pods))
+
 	for i, pod := range pods {
 		proxyIPs[i] = pod.Status.PodIP
 	}
@@ -369,9 +381,11 @@ func (p *Provider) getTrafficTypeAnnotation(svc *topology.Service) (string, erro
 	if !ok {
 		return p.defaultTrafficType, nil
 	}
+
 	if trafficType != k8s.ServiceTypeHTTP && trafficType != k8s.ServiceTypeTCP {
 		return "", fmt.Errorf("traffic-type annotation references an unknown traffic type %q", trafficType)
 	}
+
 	return trafficType, nil
 }
 
@@ -381,9 +395,11 @@ func getSchemeAnnotation(svc *topology.Service) (string, error) {
 	if !ok {
 		return k8s.SchemeHTTP, nil
 	}
+
 	if scheme != k8s.SchemeHTTP && scheme != k8s.SchemeH2c && scheme != k8s.SchemeHTTPS {
 		return "", fmt.Errorf("scheme annotation references an unknown scheme %q", scheme)
 	}
+
 	return scheme, nil
 }
 
@@ -394,6 +410,7 @@ func buildHTTPServiceFromService(svc *topology.Service, scheme string, port int3
 		for _, subnet := range svc.Endpoints.Subsets {
 			for _, address := range subnet.Addresses {
 				url := net.JoinHostPort(address.IP, strconv.Itoa(int(port)))
+
 				servers = append(servers, dynamic.Server{
 					URL: fmt.Sprintf("%s://%s", scheme, url),
 				})
@@ -431,6 +448,7 @@ func buildTCPServiceFromService(svc *topology.Service, port int32) *dynamic.TCPS
 
 func buildHTTPServiceFromTrafficTarget(tt *topology.ServiceTrafficTarget, scheme string, port int32) *dynamic.Service {
 	servers := make([]dynamic.Server, len(tt.Destination.Pods))
+
 	for i, pod := range tt.Destination.Pods {
 		url := net.JoinHostPort(pod.IP, strconv.Itoa(int(port)))
 
@@ -447,6 +465,7 @@ func buildHTTPServiceFromTrafficTarget(tt *topology.ServiceTrafficTarget, scheme
 
 func buildTCPServiceFromTrafficTarget(tt *topology.ServiceTrafficTarget, port int32) *dynamic.TCPService {
 	servers := make([]dynamic.TCPServer, len(tt.Destination.Pods))
+
 	for i, pod := range tt.Destination.Pods {
 		servers[i].Address = net.JoinHostPort(pod.IP, strconv.Itoa(int(port)))
 	}
@@ -523,6 +542,7 @@ func hasTrafficTargetSpecTCPRoute(tt *topology.ServiceTrafficTarget) bool {
 			return true
 		}
 	}
+
 	return false
 }
 
