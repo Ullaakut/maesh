@@ -6,8 +6,6 @@ import (
 	"regexp"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
 	"github.com/go-check/check"
 	checker "github.com/vdemeester/shakers"
 )
@@ -35,9 +33,9 @@ func (s *ACLEnabledSuite) TearDownSuite(c *check.C) {
 	s.stopK3s()
 }
 
-func (s *ACLEnabledSuite) TestHTTPTrafficTarget(c *check.C) {
-	s.createResources(c, "resources/acl/enabled/http-traffic-target")
-	defer s.deleteResources(c, "resources/acl/enabled/http-traffic-target", true)
+func (s *ACLEnabledSuite) TestTrafficTarget(c *check.C) {
+	s.createResources(c, "resources/acl/enabled/traffic-target")
+	defer s.deleteResources(c, "resources/acl/enabled/traffic-target", true)
 
 	s.waitForPods(c, []string{"client-a", "client-b", "server"})
 
@@ -67,45 +65,6 @@ func (s *ACLEnabledSuite) TestHTTPTrafficTarget(c *check.C) {
 	output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 20*time.Second)
 	c.Assert(err, checker.IsNil)
 	c.Assert(output, checker.Contains, "Forbidden'403'")
-}
-
-func (s *ACLEnabledSuite) TestTCPTrafficTarget(c *check.C) {
-	s.createResources(c, "resources/acl/enabled/tcp-traffic-target")
-	defer s.deleteResources(c, "resources/acl/enabled/tcp-traffic-target", true)
-
-	s.waitForPods(c, []string{"client", "server"})
-
-	// Make sure client can hit the server.
-	curlFromClientA := []string{
-		"exec", "-i", "pod/client", "-n", "ns", "--",
-		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080 | grep 'Hostname: server'",
-	}
-	_, err := s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 20*time.Second)
-	c.Assert(err, checker.IsNil)
-}
-
-func (s *ACLEnabledSuite) printRawData(c *check.C, timeout time.Duration) {
-	proxies, err := s.client.GetKubernetesClient().CoreV1().Pods(maeshNamespace).List(metav1.ListOptions{
-		LabelSelector: "component=maesh-mesh",
-	})
-	c.Assert(err, checker.IsNil)
-	c.Assert(len(proxies.Items), checker.GreaterThan, 0)
-
-	proxyIP := proxies.Items[0].Status.PodIP
-	fmt.Println("proxyIP!", proxyIP)
-
-	args := []string{
-		"exec", "-it",
-		"pod/client",
-		"-n", "ns",
-		"--",
-		"curl",
-		fmt.Sprintf("http://%s:8080/api/rawdata", proxyIP),
-	}
-
-	output, err := s.try.WaitCommandExecuteReturn("kubectl", args, timeout)
-	c.Log(output)
-	c.Assert(err, checker.IsNil)
 }
 
 func (s *ACLEnabledSuite) TestTrafficSplit(c *check.C) {

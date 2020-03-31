@@ -18,6 +18,7 @@ import (
 	listers "k8s.io/client-go/listers/core/v1"
 )
 
+// Builder builds Topology objects based on the current state of a kubernetes cluster.
 type Builder struct {
 	svcLister            listers.ServiceLister
 	epLister             listers.EndpointsLister
@@ -29,6 +30,7 @@ type Builder struct {
 	logger               logrus.FieldLogger
 }
 
+// NewBuilder creates a new Builder.
 func NewBuilder(
 	svcLister listers.ServiceLister,
 	epLister listers.EndpointsLister,
@@ -39,7 +41,6 @@ func NewBuilder(
 	tcpRouteLister specLister.TCPRouteLister,
 	logger logrus.FieldLogger,
 ) *Builder {
-
 	return &Builder{
 		svcLister:            svcLister,
 		epLister:             epLister,
@@ -83,6 +84,14 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	return topology, nil
 }
 
+// evaluateTrafficTargets evaluates all the Topology.TrafficTargets to populate Services with ServiceTrafficTargets.
+// For each TrafficTarget it:
+// - Create a new "Service" for each kubernetes destination pods services. Destination pods are the all the pods
+//   under the current service which have the service account mentioned in a TrafficTarget.Destination.
+// - Create a new "Pod" for each pod found while traversing the destination pods and source pods.
+// - Create a new "ServiceTrafficTarget" for each new "Service" and link them together.
+// - And Finally, link "Pod"s with the "ServiceTrafficTarget". In the Pod.Outgoing for source pods and in
+//   Pod.Incoming for destination pods.
 func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	// Group pods by service account.
 	pods, err := b.podLister.List(labels.Everything())
@@ -91,13 +100,6 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	}
 	podsBySa := b.groupPodsByServiceAccount(pods)
 
-	// For each TrafficTarget:
-	// - Create a new "Service" for each kubernetes destination pods services. Destination pods are the all the pods
-	//   under the current service which have the service account mention in TrafficTarget.Destination.
-	// - Create a new "Pod" for each pod found while traversing the destination pods and source pods[2]
-	// - Create a new "ServiceTrafficTarget" for each new "Service" and link them together.
-	// - And Finally, we link "Pod"s with the "ServiceTrafficTarget". In the Pod.Outgoing for source pods and in
-	// Pod.Incoming for destination pods.
 	for _, trafficTarget := range topology.TrafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
 
@@ -174,6 +176,19 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 	return nil
 }
 
+func (b *Builder) evaluateTrafficSplits(topology *Topology) {
+	for _, trafficSplit := range topology.TrafficSplits {
+		if err := b.evaluateTrafficSplit(topology, trafficSplit); err != nil {
+			b.logger.Errorf("Unable to build TrafficSplit: %v", err)
+		}
+	}
+}
+
+// evaluateTrafficSplit evaluate a TrafficSplit to populate a Service:
+// - Make sure the Service mentioned in the TrafficSplit exists
+// - Make sure each Backend exists
+// - Make sure Backends have at least the same port opened as the Service the TrafficSplit it's attached to.
+// - Attach the TrafficSplit to the different services (service and backends)
 func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha2.TrafficSplit) error {
 	svcKey := NameNamespace{trafficSplit.Spec.Service, trafficSplit.Namespace}
 	svc, ok := topology.Services[svcKey]
@@ -227,14 +242,6 @@ func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha
 	return nil
 }
 
-func (b *Builder) evaluateTrafficSplits(topology *Topology) {
-	for _, trafficSplit := range topology.TrafficSplits {
-		if err := b.evaluateTrafficSplit(topology, trafficSplit); err != nil {
-			b.logger.Errorf("Unable to build TrafficSplit: %v", err)
-		}
-	}
-}
-
 func (b *Builder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {
 	podsBySvc := make(map[*v1.Service][]*v1.Pod)
 
@@ -264,6 +271,8 @@ func (b *Builder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameNamespace][]
 	return podsBySa
 }
 
+// buildTrafficTargetSources retrieves the Pod IPs for each Pod mentioned in a source of the given TrafficTarget.
+// If a Pod IP is not yet available, the pod will be skipped.
 func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarget, podsBySa map[NameNamespace][]*v1.Pod) []ServiceTrafficTargetSource {
 	sources := make([]ServiceTrafficTargetSource, len(tt.Sources))
 
@@ -290,6 +299,9 @@ func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarge
 	return sources
 }
 
+// getTrafficTargetDestinationPorts gets the ports mentionned in the TrafficTarget.Destination.Port.
+// If the port is "", it will returns all the ports of the Service.
+// If the port is an integer, it will returns on this port.
 func (b *Builder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.TrafficTarget) ([]v1.ServicePort, error) {
 	if tt.Destination.Port == "" {
 		return svc.Spec.Ports, nil
@@ -320,7 +332,7 @@ func (b *Builder) buildTrafficTargetSpecs(topology *Topology, tt *access.Traffic
 			key := NameNamespace{s.Name, tt.Namespace}
 			httpRouteGroup, ok := topology.HTTPRouteGroups[key]
 			if !ok {
-				return []TrafficSpec{}, fmt.Errorf("unable to get HTTPRouteGroup %s/%s", tt.Namespace, s.Name)
+				return []TrafficSpec{}, fmt.Errorf("unable to find HTTPRouteGroup %s/%s", tt.Namespace, s.Name)
 			}
 
 			var httpMatches []*spec.HTTPMatch
@@ -357,7 +369,7 @@ func (b *Builder) buildTrafficTargetSpecs(topology *Topology, tt *access.Traffic
 			key := NameNamespace{s.Name, tt.Namespace}
 			tcpRoute, ok := topology.TCPRoutes[key]
 			if !ok {
-				return []TrafficSpec{}, fmt.Errorf("unable to get TCPRoute %s/%s", tt.Namespace, s.Name)
+				return []TrafficSpec{}, fmt.Errorf("unable to find TCPRoute %s/%s", tt.Namespace, s.Name)
 			}
 
 			trafficSpec = TrafficSpec{TCPRoute: tcpRoute}
@@ -419,7 +431,7 @@ func (b *Builder) gatherHTTPRouteGroups(topology *Topology, ignored mk8s.IgnoreW
 func (b *Builder) gatherTCPRoutes(topology *Topology, ignored mk8s.IgnoreWrapper) error {
 	tcpRoutes, err := b.tcpRoutesLister.List(labels.Everything())
 	if err != nil {
-		return fmt.Errorf("unable to list TCPRouteGroups")
+		return fmt.Errorf("unable to list TCPRouteGroups: %w", err)
 	}
 	for _, tcpRoute := range tcpRoutes {
 		if ignored.IsIgnored(tcpRoute.ObjectMeta) {

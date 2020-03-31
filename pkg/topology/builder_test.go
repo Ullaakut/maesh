@@ -3,6 +3,7 @@ package topology_test
 import (
 	"context"
 	"fmt"
+	"io/ioutil"
 	"testing"
 	"time"
 
@@ -20,6 +21,7 @@ import (
 	splitclient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned"
 	splitfake "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned/fake"
 	splitInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/informers/externalversions"
+	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -96,19 +98,17 @@ func TestTopologyBuilder_BuildWithTrafficTargetAndTrafficSplit(t *testing.T) {
 		"maesh.containo.us/ratelimit-average": "100",
 		"maesh.containo.us/ratelimit-burst":   "200",
 	}
-	svcbPorts := []corev1.ServicePort{svcPort("port-8080", 8080, 8080)}
-	svccPorts := []corev1.ServicePort{svcPort("port-9091", 9091, 9091)}
-	svcdPorts := []corev1.ServicePort{svcPort("port-9092", 9092, 9092)}
+	svcPorts := []corev1.ServicePort{svcPort("port-8080", 8080, 8080)}
 
 	saA := createServiceAccount("my-ns", "service-account-a")
 	podA := createPod("my-ns", "app-a", saA, selectorAppA, "10.10.1.1")
 
 	saB := createServiceAccount("my-ns", "service-account-b")
-	svcB := createService("my-ns", "svc-b", annotations, svcbPorts, selectorAppB, "10.10.1.16")
+	svcB := createService("my-ns", "svc-b", annotations, svcPorts, selectorAppB, "10.10.1.16")
 	podB := createPod("my-ns", "app-b", saB, svcB.Spec.Selector, "10.10.2.1")
 
-	svcC := createService("my-ns", "svc-c", annotations, svccPorts, selectorAppA, "10.10.1.17")
-	svcD := createService("my-ns", "svc-d", annotations, svcdPorts, selectorAppA, "10.10.1.18")
+	svcC := createService("my-ns", "svc-c", annotations, svcPorts, selectorAppA, "10.10.1.17")
+	svcD := createService("my-ns", "svc-d", annotations, svcPorts, selectorAppA, "10.10.1.18")
 
 	apiMatch := createHTTPMatch("api", []string{"GET", "POST"}, "/api")
 	metricMatch := createHTTPMatch("metric", []string{"GET"}, "/metric")
@@ -180,6 +180,8 @@ func TestTopologyBuilder_BuildWithTrafficTargetAndTrafficSplit(t *testing.T) {
 	wantPodB1.Incoming = []*topology.ServiceTrafficTarget{wantServiceBTrafficTarget}
 	wantServiceB.TrafficTargets = []*topology.ServiceTrafficTarget{wantServiceBTrafficTarget}
 	wantServiceB.TrafficSplits = []*topology.TrafficSplit{wantTrafficSplit}
+	wantServiceC.BackendOf = []*topology.TrafficSplit{wantTrafficSplit}
+	wantServiceD.BackendOf = []*topology.TrafficSplit{wantTrafficSplit}
 
 	want := &topology.Topology{
 		Services: map[topology.NameNamespace]*topology.Service{
@@ -524,6 +526,9 @@ func createBuilder(
 		}
 	}
 
+	logger := logrus.New()
+	logger.SetOutput(ioutil.Discard)
+
 	return topology.NewBuilder(
 		svcLister,
 		epLister,
@@ -531,7 +536,8 @@ func createBuilder(
 		trafficTargetLister,
 		trafficSplitLister,
 		httpRouteGroupLister,
-		tcpRouteLister), nil
+		tcpRouteLister,
+		logger), nil
 }
 
 func podToTopologyPod(pod *corev1.Pod) *topology.Pod {

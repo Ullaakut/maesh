@@ -15,10 +15,12 @@ import (
 	v1 "k8s.io/client-go/listers/core/v1"
 )
 
+// TopologyBuilder is capable of building Topologies.
 type TopologyBuilder interface {
 	Build(ignored k8s.IgnoreWrapper) (*topology.Topology, error)
 }
 
+// TCPPortFinder is capable for finding a TCP port mapping.
 type TCPPortFinder interface {
 	Find(svc k8s.ServiceWithPort) (int32, bool)
 }
@@ -38,6 +40,7 @@ const (
 	priorityTrafficSplit          = 4
 )
 
+// Provider holds the configuration for generating dynamic configuration from a kubernetes cluster state.
 type Provider struct {
 	acl                bool
 	minHTTPPort        int32
@@ -54,6 +57,7 @@ type Provider struct {
 	logger logrus.FieldLogger
 }
 
+// New creates a new Provider.
 func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable TCPPortFinder, ignored k8s.IgnoreWrapper, minHTTPPort, maxHTTPPort int32, acl bool, defaultTrafficType, maeshNamespace string, logger logrus.FieldLogger) *Provider {
 	return &Provider{
 		acl:                acl,
@@ -70,6 +74,7 @@ func New(podLister v1.PodLister, topologyBuilder TopologyBuilder, tcpStateTable 
 	}
 }
 
+// BuildConfig builds a dynamic configuration.
 func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 	cfg := buildDefaultDynamicConfig()
 
@@ -113,7 +118,7 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 		if p.acl {
 			for _, tt := range svc.TrafficTargets {
 				if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares, maeshProxyIPs); err != nil {
-					p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-split %s: %v", svc.Namespace, svc.Name, tt.Name, err)
+					p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-target %s: %v", svc.Namespace, svc.Name, tt.Name, err)
 					continue
 				}
 			}
@@ -128,7 +133,6 @@ func (p *Provider) BuildConfig() (*dynamic.Configuration, error) {
 			}
 		}
 
-		// Create a router and a service for each TrafficSplit attached on the k8s service.
 		for _, ts := range svc.TrafficSplits {
 			if err := p.buildServiceAndRoutersForTrafficSplits(cfg, ts, scheme, trafficType, middlewares); err != nil {
 				p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-split %s: %v", svc.Namespace, svc.Name, ts.Name, err)

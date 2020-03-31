@@ -15,7 +15,6 @@ import (
 	"github.com/containous/maesh/pkg/deploylog"
 	"github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/provider"
-	"github.com/containous/maesh/pkg/providers/base"
 	"github.com/containous/maesh/pkg/topology"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	"github.com/containous/traefik/v2/pkg/safe"
@@ -50,6 +49,11 @@ type ServiceManager interface {
 	Delete(userSvc *corev1.Service) error
 }
 
+// Provider is capable of providing a dynamic configuration.
+type Provider interface {
+	BuildConfig() (*dynamic.Configuration, error)
+}
+
 // Controller hold controller configuration.
 type Controller struct {
 	log                  logrus.FieldLogger
@@ -61,7 +65,7 @@ type Controller struct {
 	handler              *Handler
 	serviceManager       ServiceManager
 	configRefreshChan    chan string
-	provider             base.Provider
+	provider             Provider
 	ignored              k8s.IgnoreWrapper
 	aclEnabled           bool
 	defaultMode          string

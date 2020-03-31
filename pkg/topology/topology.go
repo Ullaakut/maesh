@@ -1,9 +1,6 @@
 package topology
 
 import (
-	"fmt"
-	"strings"
-
 	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	specs "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
 	split "github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
@@ -11,11 +8,13 @@ import (
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// NameNamespace is a key for referencing unique resources.
 type NameNamespace struct {
 	Name      string
 	Namespace string
 }
 
+// Topology holds the graph. Each Pods and services are nodes of the graph.
 type Topology struct {
 	Services map[NameNamespace]*Service
 	Pods     map[NameNamespace]*Pod
@@ -26,6 +25,7 @@ type Topology struct {
 	TCPRoutes       map[NameNamespace]*specs.TCPRoute
 }
 
+// NewTopology create a new Topology.
 func NewTopology() *Topology {
 	return &Topology{
 		Services:        make(map[NameNamespace]*Service),
@@ -37,6 +37,8 @@ func NewTopology() *Topology {
 	}
 }
 
+// Service is a node of the graph representing a kubernetes service. A service
+// is have links with TrafficTargets and TrafficSplits.
 type Service struct {
 	Name        string
 	Namespace   string
@@ -44,13 +46,20 @@ type Service struct {
 	Annotations map[string]string
 	Ports       []corev1.ServicePort
 	ClusterIP   string
+	Endpoints   *corev1.Endpoints
 
-	BackendOf      []*TrafficSplit
-	Endpoints      *corev1.Endpoints
+	// List of TrafficSplit mentioning this service as a backend.
+	BackendOf []*TrafficSplit
+	// List of TrafficTargets that are targeting pods which are selected by this service.
 	TrafficTargets []*ServiceTrafficTarget
-	TrafficSplits  []*TrafficSplit
+	// List of TrafficSplits that are targeting this service.
+	TrafficSplits []*TrafficSplit
 }
 
+// ServiceTrafficTarget represents a TrafficTarget applied a on Service. TrafficTargets have a Destination service
+// account. This service account can be set on many pods, each of them, potentially accessible via different services.
+// A ServiceTrafficTarget is a TrafficTarget for a Service which exposes a Pod which has the TrafficTarget Destination
+// service-account.
 type ServiceTrafficTarget struct {
 	Service *Service
 	Name    string
@@ -60,12 +69,18 @@ type ServiceTrafficTarget struct {
 	Specs       []TrafficSpec
 }
 
+// ServiceTrafficTargetSource represents a source of a ServiceTrafficTarget. In the SMI specification, a TrafficTarget
+// has a list of sources, each of them being a service-account name. ServiceTrafficTargetSource represents this
+// service-account, populated with the pods having this service-account.
 type ServiceTrafficTargetSource struct {
 	ServiceAccount string
 	Namespace      string
 	Pods           []*Pod
 }
 
+// ServiceTrafficTargetDestination represents a destination of a ServiceTrafficTarget. In the SMI specification, a
+// TrafficTarget has a destination service-account. ServiceTrafficTargetDestination holds the pods exposed by the
+// Service which has this service-account.
 type ServiceTrafficTargetDestination struct {
 	ServiceAccount string
 	Namespace      string
@@ -73,6 +88,7 @@ type ServiceTrafficTargetDestination struct {
 	Pods           []*Pod
 }
 
+// TrafficSpec represents a Spec which can be used for restricting access to a route in a TrafficTarget.
 type TrafficSpec struct {
 	HTTPRouteGroup *specs.HTTPRouteGroup
 	TCPRoute       *specs.TCPRoute
@@ -80,6 +96,7 @@ type TrafficSpec struct {
 	HTTPMatches []*specs.HTTPMatch
 }
 
+// Pod is a node of the graph representing a kubernetes pod.
 type Pod struct {
 	Name           string
 	Namespace      string
@@ -91,6 +108,7 @@ type Pod struct {
 	Incoming []*ServiceTrafficTarget
 }
 
+// TrafficSplit represents a TrafficSplit applied on a Service.
 type TrafficSplit struct {
 	Name      string
 	Namespace string
@@ -99,156 +117,8 @@ type TrafficSplit struct {
 	Backends []TrafficSplitBackend
 }
 
+// TrafficSplitBackend is the backend of a TrafficSplit.
 type TrafficSplitBackend struct {
 	Weight  int
 	Service *Service
-}
-
-func (t *Topology) Dump() string {
-	var s string
-
-	s += leftPadf(0, "Services:")
-	for n, service := range t.Services {
-		s += leftPadf(1, "[%s/%s]:", n.Namespace, n.Name)
-		s += leftPadf(2, "Name: %s", service.Name)
-		s += leftPadf(2, "Namespace: %s", service.Namespace)
-		s += leftPadf(2, "ClusterIP: %s", service.ClusterIP)
-
-		if len(service.Annotations) > 0 {
-			s += leftPadf(2, "Annotations:")
-			for k, v := range service.Annotations {
-				shortval := v
-				if len(v) > 25 {
-					shortval = v[:25]
-				}
-				if len(shortval) < len(v) {
-					shortval += "..."
-				}
-				s += leftPadf(3, "- %s: %s", k, shortval)
-			}
-		}
-
-		if len(service.Selector) > 0 {
-			s += leftPadf(2, "Selector:")
-			for k, v := range service.Selector {
-				s += leftPadf(3, "- %s: %s", k, v)
-			}
-		}
-
-		if len(service.Ports) > 0 {
-			s += leftPadf(2, "Ports:")
-			for _, v := range service.Ports {
-				s += leftPadf(3, "- %d->%d", v.Port, v.TargetPort.IntVal)
-			}
-		}
-
-		if len(service.TrafficTargets) > 0 {
-			s += leftPadf(2, "TrafficTargets:")
-			for _, tt := range service.TrafficTargets {
-				s += leftPadf(3, "- [%s]", tt.Name)
-				s += leftPadf(4, "Name: %s", tt.Name)
-				s += leftPadf(4, "Service: %s/%s", tt.Service.Namespace, tt.Service.Name)
-
-				if len(tt.Sources) > 0 {
-					s += leftPadf(4, "Sources:")
-					for _, source := range tt.Sources {
-						s += leftPadf(5, "[%s/%s]", source.Namespace, source.ServiceAccount)
-						s += leftPadf(6, "ServiceAccount: %s", source.ServiceAccount)
-						s += leftPadf(6, "Namespace: %s", source.Namespace)
-						if len(source.Pods) > 0 {
-							s += leftPadf(6, "Pods:")
-							for _, pod := range source.Pods {
-								s += leftPadf(7, "- %s/%s", pod.Namespace, pod.Name)
-							}
-						}
-					}
-				}
-
-				s += leftPadf(4, "Destination:")
-				s += leftPadf(5, "ServiceAccount: %s", tt.Destination.ServiceAccount)
-				s += leftPadf(5, "Namespace: %s", tt.Destination.Namespace)
-				if len(tt.Destination.Pods) > 0 {
-					s += leftPadf(5, "Pods: %s", tt.Destination.Namespace)
-					for _, pod := range tt.Destination.Pods {
-						s += leftPadf(6, "- %s/%s", pod.Namespace, pod.Name)
-					}
-				}
-				if len(tt.Destination.Ports) > 0 {
-					s += leftPadf(5, "Ports:")
-					for _, svcPort := range tt.Destination.Ports {
-						s += leftPadf(6, "- %d -> %d", svcPort.Port, svcPort.TargetPort.IntVal)
-					}
-				}
-
-				if len(tt.Specs) > 0 {
-					s += leftPadf(4, "Specs:")
-					for _, spec := range tt.Specs {
-						if spec.HTTPRouteGroup != nil {
-							s += leftPadf(5, "[%s:%s-%s]", spec.HTTPRouteGroup.Kind, spec.HTTPRouteGroup.Namespace, spec.HTTPRouteGroup.Name)
-							for _, match := range spec.HTTPRouteGroup.Matches {
-								s += leftPadf(6, "- name=%s pathRegex=%s methods=%s", match.Name, match.PathRegex, strings.Join(match.Methods, ","))
-							}
-						}
-
-						if spec.TCPRoute != nil {
-							s += leftPadf(5, "[%s:%s-%s]", spec.TCPRoute.Kind, spec.TCPRoute.Namespace, spec.TCPRoute.Name)
-						}
-					}
-				}
-
-			}
-		}
-
-		if len(service.TrafficSplits) > 0 {
-			s += leftPadf(2, "TrafficSplits:")
-			for _, ts := range service.TrafficSplits {
-				s += leftPadf(3, "[%s/%s]", ts.Namespace, ts.Name)
-				s += leftPadf(4, "Service: %p", ts.Service)
-
-				if len(ts.Backends) > 0 {
-					s += leftPadf(4, "Backends:")
-					for _, backend := range ts.Backends {
-						s += leftPadf(4, "- weight=%d service=%s/%s ", backend.Weight, backend.Service.Namespace, backend.Service.Name)
-					}
-				}
-
-			}
-		}
-	}
-
-	if len(t.Pods) > 0 {
-		s += leftPadf(0, "Pods:")
-		for k, pod := range t.Pods {
-			s += leftPadf(1, "[%s/%s]", k.Namespace, k.Name)
-			s += leftPadf(2, "Namespace: %s", pod.Namespace)
-			s += leftPadf(2, "Name: %s", pod.Name)
-			s += leftPadf(2, "IP: %s", pod.IP)
-
-			if len(pod.Outgoing) > 0 {
-				s += leftPadf(2, "Outgoing:")
-				for _, out := range pod.Outgoing {
-					s += leftPadf(3, "- service=%s traffic-target=%s", out.Service.Name, out.Name)
-				}
-			}
-
-			if len(pod.Incoming) > 0 {
-				s += leftPadf(2, "Incoming:")
-				for _, in := range pod.Incoming {
-					s += leftPadf(3, "- service=%s traffic-target=%s", in.Service.Name, in.Name)
-				}
-			}
-		}
-	}
-
-	return s
-}
-
-func leftPadf(indent int, format string, args ...interface{}) string {
-	var prefix string
-
-	for i := 0; i < indent; i++ {
-		prefix += "  "
-	}
-
-	return fmt.Sprintf(prefix+format+"\n", args...)
 }
