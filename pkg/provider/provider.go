@@ -23,15 +23,6 @@ type TCPPortFinder interface {
 	Find(svc k8s.ServiceWithPort) (int32, bool)
 }
 
-// TODO:
-// - Check if backend is HTTP and if port is exposed on the backend
-// - Does the liveness probe and readiness probe works?
-
-// TESTS:
-// - TrafficSplit backend has invalid ports
-// - TrafficSplit uses the Port, not the TargetPort
-// - Nested TrafficSplits
-
 // When multiple Traefik Routers listen to the same entrypoint and have the same Rule, the chosen router will be the one
 // with the highest priority. There are few cases where this priority is crucial when building the dynamic configuration:
 // - When a TrafficSplit is set on a k8s service, this will create 2 Traefik Routers. One for accessing the k8s service
