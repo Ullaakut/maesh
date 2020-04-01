@@ -4,11 +4,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
-
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
+	"github.com/deislabs/smi-sdk-go/pkg/apis/split/v1alpha2"
 	accessLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/listers/access/v1alpha1"
 	specLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/listers/specs/v1alpha1"
 	splitLister "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/listers/split/v1alpha2"
@@ -104,16 +103,15 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 		return fmt.Errorf("unable to list Pods: %w", err)
 	}
 
-	podsBySa := b.groupPodsByServiceAccount(pods)
+	endPoints, err := b.epLister.List(labels.Everything())
+	if err != nil {
+		return fmt.Errorf("unable to list EndPoints: %w", err)
+	}
+
+	podsBySaService, podsBySa := b.groupPodsByServiceAccountService(pods, endPoints)
 
 	for _, trafficTarget := range topology.TrafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
-
-		// Group destination pods by service.
-		podsBySvc, err := b.groupPodsByService(podsBySa[destSaKey])
-		if err != nil {
-			return fmt.Errorf("unable to group pods by service: %w", err)
-		}
 
 		// Build traffic target sources.
 		sources := b.buildTrafficTargetSources(topology, trafficTarget, podsBySa)
@@ -125,7 +123,9 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 			continue
 		}
 
-		for service, pods := range podsBySvc {
+		for svc, pods := range podsBySaService[destSaKey] {
+			service := topology.Services[svc]
+
 			svcKey := NameNamespace{service.Name, service.Namespace}
 
 			svc, ok := topology.Services[svcKey]
@@ -273,16 +273,46 @@ func (b *Builder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod,
 	return podsBySvc, nil
 }
 
-func (b *Builder) groupPodsByServiceAccount(pods []*v1.Pod) map[NameNamespace][]*v1.Pod {
+func (b *Builder) groupPodsByServiceAccountService(pods []*v1.Pod, eps []*v1.Endpoints) (map[NameNamespace]map[NameNamespace][]*v1.Pod, map[NameNamespace][]*v1.Pod) {
 	podsBySa := make(map[NameNamespace][]*v1.Pod)
-
+	p := make(map[NameNamespace]*v1.Pod)
 	for _, pod := range pods {
-		saKey := NameNamespace{pod.Spec.ServiceAccountName, pod.Namespace}
+		keyPod := NameNamespace{Name: pod.Name, Namespace: pod.Namespace}
+		p[keyPod] = pod
 
+		saKey := NameNamespace{pod.Spec.ServiceAccountName, pod.Namespace}
 		podsBySa[saKey] = append(podsBySa[saKey], pod)
 	}
 
-	return podsBySa
+	groupedPods := make(map[NameNamespace]map[NameNamespace][]*v1.Pod)
+
+	for _, ep := range eps {
+		for _, subset := range ep.Subsets {
+			for _, address := range subset.Addresses {
+				if address.TargetRef == nil {
+					b.logger.Errorf("targetRef nil for %s-%s %s", ep.Name, ep.Namespace, address.Hostname)
+					continue
+				}
+
+				keyPod := NameNamespace{Name: address.TargetRef.Name, Namespace: address.TargetRef.Namespace}
+				pod, ok := p[keyPod]
+				if !ok {
+					continue
+				}
+
+				keySA := NameNamespace{Name: pod.Spec.ServiceAccountName, Namespace: pod.Namespace}
+				keyEP := NameNamespace{Name: ep.Name, Namespace: ep.Namespace}
+
+				if _, ok := groupedPods[keySA]; !ok {
+					groupedPods[keySA] = make(map[NameNamespace][]*v1.Pod)
+				}
+
+				groupedPods[keySA][keyEP] = append(groupedPods[keySA][keyEP], pod)
+			}
+		}
+	}
+
+	return groupedPods, podsBySa
 }
 
 // buildTrafficTargetSources retrieves the Pod IPs for each Pod mentioned in a source of the given TrafficTarget.
@@ -296,12 +326,12 @@ func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarge
 		pods := podsBySa[srcSaKey]
 		srcPods := make([]*Pod, len(pods))
 
-		for i, pod := range pods {
+		for k, pod := range pods {
 			if pod.Status.PodIP == "" {
 				continue
 			}
 
-			srcPods[i] = getOrCreatePod(t, pod)
+			srcPods[k] = getOrCreatePod(t, pod)
 		}
 
 		sources[i] = ServiceTrafficTargetSource{
@@ -317,9 +347,9 @@ func (b *Builder) buildTrafficTargetSources(t *Topology, tt *access.TrafficTarge
 // getTrafficTargetDestinationPorts gets the ports mentionned in the TrafficTarget.Destination.Port.
 // If the port is "", it will returns all the ports of the Service.
 // If the port is an integer, it will returns on this port.
-func (b *Builder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.TrafficTarget) ([]v1.ServicePort, error) {
+func (b *Builder) getTrafficTargetDestinationPorts(svc *Service, tt *access.TrafficTarget) ([]v1.ServicePort, error) {
 	if tt.Destination.Port == "" {
-		return svc.Spec.Ports, nil
+		return svc.Ports, nil
 	}
 
 	port, err := strconv.ParseInt(tt.Destination.Port, 10, 32)
@@ -327,7 +357,7 @@ func (b *Builder) getTrafficTargetDestinationPorts(svc *v1.Service, tt *access.T
 		return nil, fmt.Errorf("destination port of TrafficTarget %s/%s is not a valid port: %w", tt.Namespace, tt.Name, err)
 	}
 
-	for _, svcPort := range svc.Spec.Ports {
+	for _, svcPort := range svc.Ports {
 		if svcPort.TargetPort.IntVal == int32(port) {
 			return []v1.ServicePort{svcPort}, nil
 		}
