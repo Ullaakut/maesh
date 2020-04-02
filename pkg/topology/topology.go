@@ -48,12 +48,14 @@ type Service struct {
 	ClusterIP   string
 	Endpoints   *corev1.Endpoints
 
-	// List of TrafficSplit mentioning this service as a backend.
-	BackendOf []*TrafficSplit
 	// List of TrafficTargets that are targeting pods which are selected by this service.
 	TrafficTargets []*ServiceTrafficTarget
 	// List of TrafficSplits that are targeting this service.
 	TrafficSplits []*TrafficSplit
+	// List of TrafficSplit mentioning this service as a backend.
+	BackendOf []*TrafficSplit
+	// List of Pods that are explicitly allowed to reach this service.
+	Incoming []*Pod
 }
 
 // ServiceTrafficTarget represents a TrafficTarget applied a on Service. TrafficTargets have a Destination service

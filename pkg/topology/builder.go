@@ -85,6 +85,16 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 
 	b.evaluateTrafficSplits(topology)
 
+	for _, svc := range topology.Services {
+		pods, err := b.getIncomingPodsForService(svc)
+		if err != nil {
+			b.logger.Errorf("Unable to get incoming pods for service %s/%s: %v", svc.Namespace, svc.Name, err)
+			continue
+		}
+
+		svc.Incoming = pods
+	}
+
 	return topology, nil
 }
 
@@ -254,6 +264,10 @@ func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha
 	svc.TrafficSplits = append(svc.TrafficSplits, ts)
 
 	return nil
+}
+
+func (b *Builder) getIncomingPodsForService(svc *Service) ([]*Pod, error) {
+	return []*Pod{}, nil
 }
 
 func (b *Builder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {
