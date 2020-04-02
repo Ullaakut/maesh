@@ -79,7 +79,7 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	}
 
 	// Build the topology based on the gathered objects.
-	if err := b.evaluateTrafficTargets(topology); err != nil {
+	if err := b.evaluateTrafficTargets(topology, ignored); err != nil {
 		return nil, fmt.Errorf("unable to evaluate TrafficTargets: %w", err)
 	}
 
@@ -96,7 +96,7 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 // - Create a new "ServiceTrafficTarget" for each new "Service" and link them together.
 // - And Finally, link "Pod"s with the "ServiceTrafficTarget". In the Pod.Outgoing for source pods and in
 //   Pod.Incoming for destination pods.
-func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
+func (b *Builder) evaluateTrafficTargets(topology *Topology, ignored mk8s.IgnoreWrapper) error {
 	// Group pods by service account.
 	pods, err := b.podLister.List(labels.Everything())
 	if err != nil {
@@ -108,7 +108,7 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 		return fmt.Errorf("unable to list EndPoints: %w", err)
 	}
 
-	podsBySaService, podsBySa := b.groupPodsByServiceAccountService(pods, endPoints)
+	podsBySaByService, podsBySa := b.groupPodsByServiceAccountAndService(ignored, pods, endPoints)
 
 	for _, trafficTarget := range topology.TrafficTargets {
 		destSaKey := NameNamespace{trafficTarget.Destination.Name, trafficTarget.Destination.Namespace}
@@ -123,7 +123,7 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology) error {
 			continue
 		}
 
-		for svc, pods := range podsBySaService[destSaKey] {
+		for svc, pods := range podsBySaByService[destSaKey] {
 			service := topology.Services[svc]
 
 			svcKey := NameNamespace{service.Name, service.Namespace}
@@ -273,10 +273,15 @@ func (b *Builder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod,
 	return podsBySvc, nil
 }
 
-func (b *Builder) groupPodsByServiceAccountService(pods []*v1.Pod, eps []*v1.Endpoints) (map[NameNamespace]map[NameNamespace][]*v1.Pod, map[NameNamespace][]*v1.Pod) {
+func (b *Builder) groupPodsByServiceAccountAndService(ignored mk8s.IgnoreWrapper, pods []*v1.Pod, eps []*v1.Endpoints) (map[NameNamespace]map[NameNamespace][]*v1.Pod, map[NameNamespace][]*v1.Pod) {
 	podsBySa := make(map[NameNamespace][]*v1.Pod)
 	p := make(map[NameNamespace]*v1.Pod)
+
 	for _, pod := range pods {
+		if ignored.IsIgnored(pod.ObjectMeta) {
+			continue
+		}
+
 		keyPod := NameNamespace{Name: pod.Name, Namespace: pod.Namespace}
 		p[keyPod] = pod
 
@@ -287,10 +292,13 @@ func (b *Builder) groupPodsByServiceAccountService(pods []*v1.Pod, eps []*v1.End
 	groupedPods := make(map[NameNamespace]map[NameNamespace][]*v1.Pod)
 
 	for _, ep := range eps {
+		if ignored.IsIgnored(ep.ObjectMeta) {
+			continue
+		}
+
 		for _, subset := range ep.Subsets {
 			for _, address := range subset.Addresses {
 				if address.TargetRef == nil {
-					b.logger.Errorf("targetRef nil for %s-%s %s", ep.Name, ep.Namespace, address.Hostname)
 					continue
 				}
 
