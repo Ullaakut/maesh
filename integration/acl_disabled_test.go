@@ -1,13 +1,12 @@
 package integration
 
 import (
-	"errors"
 	"fmt"
-	"regexp"
-	"time"
 
+	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	"github.com/go-check/check"
 	checker "github.com/vdemeester/shakers"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // ACLDisabledSuite
@@ -19,14 +18,12 @@ func (s *ACLDisabledSuite) SetUpSuite(c *check.C) {
 		"containous/whoami:v1.0.1",
 		"containous/whoamitcp",
 		"coredns/coredns:1.6.3",
-		"giantswarm/tiny-tools:3.9",
 		"traefik:v2.1.6",
 	}
 	s.startk3s(c, requiredImages)
 	s.startAndWaitForCoreDNS(c)
-	err := s.installHelmMaesh(c, false, false, false)
-	c.Assert(err, checker.IsNil)
-	s.waitForMaeshControllerStarted(c)
+	s.createResources(c, "resources/tcp-state-table/")
+	s.createResources(c, "resources/smi/crds/")
 }
 
 func (s *ACLDisabledSuite) TearDownSuite(c *check.C) {
@@ -36,80 +33,140 @@ func (s *ACLDisabledSuite) TearDownSuite(c *check.C) {
 func (s *ACLDisabledSuite) TestHTTPService(c *check.C) {
 	s.createResources(c, "resources/acl/disabled/http")
 	defer s.deleteResources(c, "resources/acl/disabled/http", true)
+	defer s.deleteShadowServices(c)
 
-	s.waitForPods(c, []string{"client", "server"})
+	s.waitForPods(c, []string{"server"})
 
-	args := []string{
-		"exec", "-it", "pod/client", "-n", "ns", "--",
-		"curl", "--fail", "server.ns.maesh:8080",
-	}
+	cmd := s.startMaeshBinaryCmd(c, false, false)
+	err := cmd.Start()
 
-	err := s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
 	c.Assert(err, checker.IsNil)
+	defer s.stopMaeshBinary(c, cmd.Process)
+
+	config := s.testConfigurationWithReturn(c, "resources/acl/disabled/http.json")
+
+	serverSvc := s.getService(c, "server")
+	serverPod := s.getPod(c, "server")
+
+	s.checkBlockAllMiddleware(c, config)
+	s.checkHTTPReadinessService(c, config)
+	s.checkHTTPServiceLoadBalancer(c, config, serverSvc, []*corev1.Pod{serverPod})
 }
 
 func (s *ACLDisabledSuite) TestTCPService(c *check.C) {
 	s.createResources(c, "resources/acl/disabled/tcp")
 	defer s.deleteResources(c, "resources/acl/disabled/tcp", true)
+	defer s.deleteShadowServices(c)
 
-	s.waitForPods(c, []string{"client", "server"})
+	s.waitForPods(c, []string{"server"})
 
-	args := []string{
-		"exec", "-it", "pod/client", "-n", "ns", "--",
-		"ash", "-c", "echo 'WHO' | nc -q 0 server.ns.maesh 8080 | grep 'Hostname: server'",
-	}
+	cmd := s.startMaeshBinaryCmd(c, false, false)
+	err := cmd.Start()
 
-	err := s.try.WaitCommandExecute("kubectl", args, "", 10*time.Second)
 	c.Assert(err, checker.IsNil)
+	defer s.stopMaeshBinary(c, cmd.Process)
+
+	config := s.testConfigurationWithReturn(c, "resources/acl/disabled/tcp.json")
+
+	serverSvc := s.getService(c, "server")
+	serverPod := s.getPod(c, "server")
+
+	s.checkHTTPReadinessService(c, config)
+	s.checkTCPServiceLoadBalancer(c, config, serverSvc, []*corev1.Pod{serverPod})
 }
 
-func (s *ACLDisabledSuite) TestTrafficSplit(c *check.C) {
+func (s *ACLDisabledSuite) TestSplitTraffic(c *check.C) {
 	s.createResources(c, "resources/acl/disabled/traffic-split")
 	defer s.deleteResources(c, "resources/acl/disabled/traffic-split", true)
+	defer s.deleteShadowServices(c)
 
-	s.waitForPods(c, []string{"client", "server-v1", "server-v2"})
+	s.waitForPods(c, []string{"server-v1", "server-v2"})
 
-	err := s.try.Retry(func() error {
-		var fstCall, secCall string
-		var err error
+	cmd := s.startMaeshBinaryCmd(c, false, false)
+	err := cmd.Start()
 
-		// Call two times the Service which has a TrafficSplit.
-		fstCall, err = s.kubectlExec("ns", "pod/client", "curl", "server.ns.maesh:8080")
-		if err != nil {
-			return err
-		}
-		secCall, err = s.kubectlExec("ns", "pod/client", "curl", "server.ns.maesh:8080")
-		if err != nil {
-			return err
-		}
-
-		// Make sure each call ended up on a different backend.
-		backendHostReg := regexp.MustCompile(`Host: server-v([12])\.ns\.maesh:8080`)
-		backendsHit := make(map[string]bool)
-
-		matchFstCall := backendHostReg.FindStringSubmatch(fstCall)
-		if matchFstCall == nil {
-			return errors.New("unable to find Host header in response")
-		}
-		backendsHit[matchFstCall[1]] = true
-
-		matchSecCall := backendHostReg.FindStringSubmatch(secCall)
-		if matchSecCall == nil {
-			return errors.New("unable to find Host header in response")
-		}
-		backendsHit[matchSecCall[1]] = true
-
-		if len(backendsHit) != 2 {
-			return fmt.Errorf("expected to hit 2 different backends, got %d", len(backendsHit))
-		}
-		return nil
-	}, 10*time.Second)
 	c.Assert(err, checker.IsNil)
+	defer s.stopMaeshBinary(c, cmd.Process)
+
+	config := s.testConfigurationWithReturn(c, "resources/acl/disabled/traffic-split.json")
+
+	s.checkBlockAllMiddleware(c, config)
+
+	serverV1Svc := s.getService(c, "server-v1")
+	serverV1Pod := s.getPod(c, "server-v1")
+
+	s.checkHTTPServiceLoadBalancer(c, config, serverV1Svc, []*corev1.Pod{serverV1Pod})
+
+	serverV2Svc := s.getService(c, "server-v2")
+	serverV2Pod := s.getPod(c, "server-v2")
+
+	s.checkHTTPServiceLoadBalancer(c, config, serverV2Svc, []*corev1.Pod{serverV2Pod})
 }
 
-func (s *ACLDisabledSuite) waitForPods(c *check.C, pods []string) {
-	for _, pod := range pods {
-		err := s.try.WaitPodIPAssigned(pod, "ns", 30*time.Second)
-		c.Assert(err, checker.IsNil)
+func (s *ACLDisabledSuite) checkBlockAllMiddleware(c *check.C, config *dynamic.Configuration) {
+	middleware := config.HTTP.Middlewares["block-all-middleware"]
+	c.Assert(middleware, checker.NotNil)
+
+	c.Assert(middleware.IPWhiteList.SourceRange, checker.HasLen, 1)
+	c.Assert(middleware.IPWhiteList.SourceRange[0], checker.Equals, "255.255.255.255")
+}
+
+func (s *ACLDisabledSuite) checkHTTPReadinessService(c *check.C, config *dynamic.Configuration) {
+	service := config.HTTP.Services["readiness"]
+	c.Assert(service, checker.NotNil)
+
+	c.Assert(service.LoadBalancer.Servers, checker.HasLen, 1)
+	c.Assert(service.LoadBalancer.Servers[0].URL, checker.Equals, "http://127.0.0.1:8080")
+}
+
+func (s *ACLDisabledSuite) checkHTTPServiceLoadBalancer(c *check.C, config *dynamic.Configuration, svc *corev1.Service, pods []*corev1.Pod) {
+	for _, port := range svc.Spec.Ports {
+		svcKey := fmt.Sprintf("%s-%s-%d", svc.Namespace, svc.Name, port.Port)
+
+		service := config.HTTP.Services[svcKey]
+		c.Assert(service, checker.NotNil)
+
+		c.Assert(service.LoadBalancer.Servers, checker.HasLen, len(pods))
+
+		for _, pod := range pods {
+			wantURL := fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port.TargetPort.IntVal)
+
+			var found bool
+
+			for _, server := range service.LoadBalancer.Servers {
+				if wantURL == server.URL {
+					found = true
+					break
+				}
+			}
+
+			c.Assert(found, checker.True)
+		}
+	}
+}
+
+func (s *ACLDisabledSuite) checkTCPServiceLoadBalancer(c *check.C, config *dynamic.Configuration, svc *corev1.Service, pods []*corev1.Pod) {
+	for _, port := range svc.Spec.Ports {
+		svcKey := fmt.Sprintf("%s-%s-%d", svc.Namespace, svc.Name, port.Port)
+
+		service := config.TCP.Services[svcKey]
+		c.Assert(service, checker.NotNil)
+
+		c.Assert(service.LoadBalancer.Servers, checker.HasLen, len(pods))
+
+		for _, pod := range pods {
+			wantURL := fmt.Sprintf("%s:%d", pod.Status.PodIP, port.TargetPort.IntVal)
+
+			var found bool
+
+			for _, server := range service.LoadBalancer.Servers {
+				if wantURL == server.Address {
+					found = true
+					break
+				}
+			}
+
+			c.Assert(found, checker.True)
+		}
 	}
 }
