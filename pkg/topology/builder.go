@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/containous/maesh/pkg/event"
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	access "github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
@@ -26,7 +27,7 @@ type Builder struct {
 	trafficSplitLister   splitLister.TrafficSplitLister
 	httpRouteGroupLister specLister.HTTPRouteGroupLister
 	tcpRoutesLister      specLister.TCPRouteLister
-	logger               logrus.FieldLogger
+	logger               event.LogrusReporter
 }
 
 // NewBuilder creates a new Builder.
@@ -48,7 +49,7 @@ func NewBuilder(
 		trafficSplitLister:   trafficSplitLister,
 		httpRouteGroupLister: httpRouteGroupLister,
 		tcpRoutesLister:      tcpRouteLister,
-		logger:               logger,
+		logger:               event.NewLogrusReporter(logger),
 	}
 }
 
@@ -89,7 +90,7 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 		for _, ts := range svc.TrafficSplits {
 			pods, err := b.getIncomingPodsForTrafficSplit(ts)
 			if err != nil {
-				b.logger.Errorf("Unable to get incoming pods for service %s/%s: %v", svc.Namespace, svc.Name, err)
+				b.logger.ForSubject(svc.Namespace, "Service", svc.Name).Errorf("Unable to get incoming pods: %v", err)
 				continue
 			}
 
@@ -204,7 +205,7 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology, ignored mk8s.Ignore
 		// Build traffic target specs.
 		specs, err := b.buildTrafficTargetSpecs(topology, trafficTarget)
 		if err != nil {
-			b.logger.Errorf("Unable to build Specs for TrafficTarget %s/%s: %v", trafficTarget.Namespace, trafficTarget.Name, err)
+			b.logger.ForSubject(trafficTarget.Namespace, "TrafficTarget", trafficTarget.Name).Errorf("Unable to build Specs: %v", err)
 			continue
 		}
 
@@ -232,7 +233,7 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology, ignored mk8s.Ignore
 			// Find out which port can be used on the destination service.
 			destPorts, err := b.getTrafficTargetDestinationPorts(service, trafficTarget)
 			if err != nil {
-				b.logger.Errorf("Unable to get TrafficTarget %s/%s destination ports on Service %s/%s: %v", trafficTarget.Namespace, trafficTarget.Name, service.Namespace, service.Name, err)
+				b.logger.ForSubject(service.Namespace, "Service", service.Name).Errorf("Unable to get TrafficTarget %s/%s destination ports: %v", trafficTarget.Namespace, trafficTarget.Name, err)
 				continue
 			}
 
@@ -273,7 +274,7 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology, ignored mk8s.Ignore
 func (b *Builder) evaluateTrafficSplits(topology *Topology) {
 	for _, trafficSplit := range topology.TrafficSplits {
 		if err := b.evaluateTrafficSplit(topology, trafficSplit); err != nil {
-			b.logger.Errorf("Unable to build TrafficSplit: %v", err)
+			b.logger.ForSubject(trafficSplit.Namespace, "TrafficSplit", trafficSplit.Name).Errorf("Unable to build TrafficSplit: %v", err)
 		}
 	}
 }
