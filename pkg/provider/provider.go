@@ -193,8 +193,8 @@ func (p *Provider) buildServicesAndRoutersForService(cfg *dynamic.Configuration,
 func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configuration, tt *topology.ServiceTrafficTarget, scheme, trafficType string, middlewares []string, maeshProxyIPs []string) error {
 	switch trafficType {
 	case k8s.ServiceTypeHTTP:
-		whitelistMiddleware := buildWhitelistMiddleware(tt)
-		whitelistMiddlewareDirectKey := getWhitelistMiddlewareDirectKey(tt)
+		whitelistMiddleware := buildWhitelistMiddlewareFromTrafficTarget(tt)
+		whitelistMiddlewareDirectKey := getWhitelistMiddlewareDirectKeyFromTrafficTarget(tt)
 		cfg.HTTP.Middlewares[whitelistMiddlewareDirectKey] = whitelistMiddleware
 
 		rule := buildHTTPRuleFromTrafficTarget(tt)
@@ -214,8 +214,8 @@ func (p *Provider) buildServicesAndRoutersForTrafficTargets(cfg *dynamic.Configu
 			// If the ServiceTrafficTarget is a backend of at least one TrafficSplit we need an additional router with
 			// a whitelist middleware which whitelists based on the X-Forwarded-For header instead of on the RemoteAddr value.
 			if len(tt.Service.BackendOf) > 0 {
-				whitelistMiddlewareIndirect := buildWhitelistMiddlewareIndirect(tt, maeshProxyIPs)
-				whitelistMiddlewareIndirectKey := getWhitelistMiddlewareIndirectKey(tt)
+				whitelistMiddlewareIndirect := buildWhitelistMiddlewareIndirectFromTrafficTarget(tt)
+				whitelistMiddlewareIndirectKey := getWhitelistMiddlewareIndirectKeyFromTrafficTarget(tt)
 				cfg.HTTP.Middlewares[whitelistMiddlewareIndirectKey] = whitelistMiddlewareIndirect
 
 				indirectKey := getRouterKeyFromTrafficTargetIndirect(tt, svcPort.Port)
@@ -254,6 +254,15 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 	case k8s.ServiceTypeHTTP:
 		rule := buildHTTPRuleFromService(ts.Service)
 
+		rtrMiddlewares := middlewares
+		if p.acl {
+			whitelistMiddleware := buildWhitelistMiddlewareFromTrafficSplit(ts)
+			whitelistMiddlewareDirectKey := getWhitelistMiddlewareDirectKeyFromTrafficSplit(ts)
+			cfg.HTTP.Middlewares[whitelistMiddlewareDirectKey] = whitelistMiddleware
+
+			rtrMiddlewares = addToSliceCopy(middlewares, whitelistMiddlewareDirectKey)
+		}
+
 		for portID, svcPort := range ts.Service.Ports {
 			backendSvcs := make([]dynamic.WRRService, len(ts.Backends))
 
@@ -276,7 +285,20 @@ func (p *Provider) buildServiceAndRoutersForTrafficSplits(cfg *dynamic.Configura
 
 			key := getServiceRouterKeyFromTrafficSplit(ts, svcPort.Port)
 			cfg.HTTP.Services[key] = buildHTTPServiceFromTrafficSplit(backendSvcs)
-			cfg.HTTP.Routers[key] = buildHTTPRouter(rule, entrypoint, middlewares, key, priorityTrafficSplit)
+			cfg.HTTP.Routers[key] = buildHTTPRouter(rule, entrypoint, rtrMiddlewares, key, priorityTrafficSplit)
+
+			// If the ServiceTrafficSplit is a backend of at least one TrafficSplit we need an additional router with
+			// a whitelist middleware which whitelists based on the X-Forwarded-For header instead of on the RemoteAddr value.
+			if len(ts.Service.BackendOf) > 0 && p.acl {
+				whitelistMiddlewareIndirect := buildWhitelistMiddlewareIndirectFromTrafficSplit(ts)
+				whitelistMiddlewareIndirectKey := getWhitelistMiddlewareIndirectKeyTrafficSplit(ts)
+				cfg.HTTP.Middlewares[whitelistMiddlewareIndirectKey] = whitelistMiddlewareIndirect
+
+				indirectKey := getRouterKeyFromTrafficSplitIndirect(ts, svcPort.Port)
+				rule = buildHTTPRuleFromTrafficSplitIndirect(ts)
+				rtrMiddlewaresindirect := addToSliceCopy(middlewares, whitelistMiddlewareIndirectKey)
+				cfg.HTTP.Routers[indirectKey] = buildHTTPRouter(rule, entrypoint, rtrMiddlewaresindirect, key, priorityTrafficTargetIndirect)
+			}
 		}
 	case k8s.ServiceTypeTCP:
 		tcpRule := buildTCPRouterRule()

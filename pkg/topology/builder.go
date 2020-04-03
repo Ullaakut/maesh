@@ -86,16 +86,91 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 	b.evaluateTrafficSplits(topology)
 
 	for _, svc := range topology.Services {
-		pods, err := b.getIncomingPodsForService(svc)
-		if err != nil {
-			b.logger.Errorf("Unable to get incoming pods for service %s/%s: %v", svc.Namespace, svc.Name, err)
-			continue
-		}
+		for _, ts := range svc.TrafficSplits {
+			pods, err := b.getIncomingPodsForTrafficSplit(ts)
+			if err != nil {
+				b.logger.Errorf("Unable to get incoming pods for service %s/%s: %v", svc.Namespace, svc.Name, err)
+				continue
+			}
 
-		svc.Incoming = pods
+			ts.Incoming = pods
+		}
 	}
 
 	return topology, nil
+}
+
+// TODO check recursion
+func (b *Builder) getIncomingPodsForTrafficSplit(ts *TrafficSplit) ([]*Pod, error) {
+	var union []*Pod
+
+	for _, backend := range ts.Backends {
+		backendPods, err := b.getIncomingPodsForService(backend.Service)
+		if err != nil {
+			return nil, err
+		}
+
+		union = unionPod(backendPods, union)
+
+		if len(union) == 0 {
+			return union, nil
+		}
+	}
+
+	return union, nil
+}
+
+func (b *Builder) getIncomingPodsForService(svc *Service) ([]*Pod, error) {
+	var union []*Pod
+
+	if len(svc.TrafficSplits) == 0 {
+		var pods []*Pod
+
+		for _, tt := range svc.TrafficTargets {
+			for _, source := range tt.Sources {
+				for _, pod := range source.Pods {
+					pods = append(pods, pod)
+				}
+			}
+		}
+
+		return pods, nil
+	}
+
+	for _, ts := range svc.TrafficSplits {
+		tsPods, err := b.getIncomingPodsForTrafficSplit(ts)
+		if err != nil {
+			return nil, err
+		}
+
+		union = unionPod(tsPods, union)
+
+		if len(union) == 0 {
+			return union, nil
+		}
+	}
+
+	return union, nil
+}
+
+func unionPod(pods1, pods2 []*Pod) []*Pod {
+	if pods2 == nil {
+		return pods1
+	}
+
+	union := []*Pod{}
+	p := map[*Pod]bool{}
+	for _, pod := range pods1 {
+		p[pod] = true
+	}
+
+	for _, pod := range pods2 {
+		if _, found := p[pod]; found {
+			union = append(union, pod)
+		}
+	}
+
+	return union
 }
 
 // evaluateTrafficTargets evaluates all the Topology.TrafficTargets to populate Services with ServiceTrafficTargets.
@@ -229,7 +304,7 @@ func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha
 
 		backendSvc, ok := topology.Services[backendSvcKey]
 		if !ok {
-			return fmt.Errorf("unable to find backend Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, trafficSplit.Spec.Service, trafficSplit.Name)
+			return fmt.Errorf("unable to find backend Service %s/%s for TrafficSplit %s", trafficSplit.Namespace, backend.Service, trafficSplit.Name)
 		}
 
 		// As required by the SMI specification, backends must expose at least the same ports as the Service on
@@ -264,10 +339,6 @@ func (b *Builder) evaluateTrafficSplit(topology *Topology, trafficSplit *v1alpha
 	svc.TrafficSplits = append(svc.TrafficSplits, ts)
 
 	return nil
-}
-
-func (b *Builder) getIncomingPodsForService(svc *Service) ([]*Pod, error) {
-	return []*Pod{}, nil
 }
 
 func (b *Builder) groupPodsByService(pods []*v1.Pod) (map[*v1.Service][]*v1.Pod, error) {

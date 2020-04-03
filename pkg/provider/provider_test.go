@@ -7,6 +7,21 @@ import (
 	"testing"
 	"time"
 
+	"github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
+
+	"k8s.io/apimachinery/pkg/runtime"
+
+	fakeSpecsClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned/fake"
+	fakeSplitClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned/fake"
+
+	fakeAccessClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned/fake"
+
+	"github.com/containous/maesh/pkg/controller"
+
+	accessInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
+	specsInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/informers/externalversions"
+	splitInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/informers/externalversions"
+
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/provider"
 	"github.com/containous/maesh/pkg/topology"
@@ -439,6 +454,7 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 			Service: svcE,
 		},
 	}
+	ts.Incoming = []*topology.Pod{podA, podC}
 
 	apiMatch := createHTTPMatch("api", []string{"GET"}, "/api")
 	metricMatch := createHTTPMatch("metric", []string{"POST"}, "/metric")
@@ -563,21 +579,28 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-tt-8080-traffic-target",
 					Priority:    2005,
-					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist-direct"},
+					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist-direct-traffic-target"},
 				},
 				"my-ns-svc-b-tt-8080-traffic-target-indirect": {
 					Rule:        "(Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)) && ((PathPrefix(`/{path:api}`) && Method(`GET`)) || (PathPrefix(`/{path:metric}`) && Method(`POST`))) && HeadersRegexp(`X-Forwarded-For`, `.+`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-tt-8080-traffic-target",
 					Priority:    3006,
-					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist-indirect"},
+					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-tt-whitelist-indirect-traffic-target"},
 				},
 				"my-ns-svc-b-ts-8080-traffic-split": {
 					Rule:        "Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)",
 					EntryPoints: []string{"http-10000"},
 					Service:     "my-ns-svc-b-ts-8080-traffic-split",
 					Priority:    4001,
-					Middlewares: []string{"my-ns-svc-b"},
+					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-ts-whitelist-direct-traffic-split"},
+				},
+				"my-ns-svc-b-ts-8080-traffic-split-indirect": {
+					Rule:        "(Host(`svc-b.my-ns.maesh`) || Host(`10.10.14.1`)) && HeadersRegexp(`X-Forwarded-For`, `.+`)",
+					EntryPoints: []string{"http-10000"},
+					Service:     "my-ns-svc-b-ts-8080-traffic-split",
+					Priority:    3002,
+					Middlewares: []string{"my-ns-svc-b", "my-ns-svc-b-ts-whitelist-indirect-traffic-split"},
 				},
 			},
 			Services: map[string]*dynamic.Service{
@@ -635,7 +658,7 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 						Expression: "LatencyAtQuantileMS(50.0) > 100",
 					},
 				},
-				"my-ns-svc-b-tt-whitelist-direct": {
+				"my-ns-svc-b-tt-whitelist-direct-traffic-target": {
 					IPWhiteList: &dynamic.IPWhiteList{
 						SourceRange: []string{
 							"10.10.1.1",
@@ -643,14 +666,33 @@ func TestProvider_BuildConfigHTTP(t *testing.T) {
 						},
 					},
 				},
-				"my-ns-svc-b-tt-whitelist-indirect": {
+				"my-ns-svc-b-ts-whitelist-direct-traffic-split": {
+					IPWhiteList: &dynamic.IPWhiteList{
+						SourceRange: []string{
+							"10.10.1.1",
+							"10.10.3.1",
+						},
+					},
+				},
+				"my-ns-svc-b-tt-whitelist-indirect-traffic-target": {
 					IPWhiteList: &dynamic.IPWhiteList{
 						SourceRange: []string{
 							"10.10.1.1",
 							"10.10.3.1",
 						},
 						IPStrategy: &dynamic.IPStrategy{
-							ExcludedIPs: []string{"10.10.10.10"},
+							Depth: 1,
+						},
+					},
+				},
+				"my-ns-svc-b-ts-whitelist-indirect-traffic-split": {
+					IPWhiteList: &dynamic.IPWhiteList{
+						SourceRange: []string{
+							"10.10.1.1",
+							"10.10.3.1",
+						},
+						IPStrategy: &dynamic.IPStrategy{
+							Depth: 1,
 						},
 					},
 				},

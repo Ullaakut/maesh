@@ -85,6 +85,13 @@ func buildHTTPRuleFromTrafficTargetIndirect(tt *topology.ServiceTrafficTarget) s
 	return fmt.Sprintf("(%s) && %s", svcRule, indirectRule)
 }
 
+func buildHTTPRuleFromTrafficSplitIndirect(ts *topology.TrafficSplit) string {
+	svcRule := buildHTTPRuleFromService(ts.Service)
+	indirectRule := "HeadersRegexp(`X-Forwarded-For`, `.+`)"
+
+	return fmt.Sprintf("(%s) && %s", svcRule, indirectRule)
+}
+
 func buildTCPRouterRule() string {
 	return "HostSNI(`*`)"
 }

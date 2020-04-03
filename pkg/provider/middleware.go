@@ -73,7 +73,7 @@ func (b *AnnotationBasedMiddlewareBuilder) Build(svc *topology.Service) (*dynami
 // from an authorized Pod. Authorized Pods are all the Pods under the Service with a ServiceAccount listed in the
 // TrafficTarget (all the Pods listed in the ServiceTrafficTarget.Sources). This middleware doesn't work if there's a
 // proxy between the authorized Pod and this Maesh proxy.
-func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middleware {
+func buildWhitelistMiddlewareFromTrafficTarget(tt *topology.ServiceTrafficTarget) *dynamic.Middleware {
 	var IPs []string
 
 	for _, source := range tt.Sources {
@@ -89,12 +89,35 @@ func buildWhitelistMiddleware(tt *topology.ServiceTrafficTarget) *dynamic.Middle
 	}
 }
 
+func buildWhitelistMiddlewareFromTrafficSplit(ts *topology.TrafficSplit) *dynamic.Middleware {
+	var IPs []string
+
+	for _, pod := range ts.Incoming {
+		IPs = append(IPs, pod.IP)
+	}
+
+	return &dynamic.Middleware{
+		IPWhiteList: &dynamic.IPWhiteList{
+			SourceRange: IPs,
+		},
+	}
+}
+
 // buildWhitelistMiddlewareIndirect builds an IPWhiteList middleware like buildWhitelistMiddleware except it's intended
 // to be used when there is at least one proxy between the authorized Pod and this Maesh proxy.
-func buildWhitelistMiddlewareIndirect(tt *topology.ServiceTrafficTarget, maeshProxyIPs []string) *dynamic.Middleware {
-	whitelist := buildWhitelistMiddleware(tt)
+func buildWhitelistMiddlewareIndirectFromTrafficTarget(tt *topology.ServiceTrafficTarget) *dynamic.Middleware {
+	whitelist := buildWhitelistMiddlewareFromTrafficTarget(tt)
 	whitelist.IPWhiteList.IPStrategy = &dynamic.IPStrategy{
-		ExcludedIPs: maeshProxyIPs,
+		Depth: 1,
+	}
+
+	return whitelist
+}
+
+func buildWhitelistMiddlewareIndirectFromTrafficSplit(ts *topology.TrafficSplit) *dynamic.Middleware {
+	whitelist := buildWhitelistMiddlewareFromTrafficSplit(ts)
+	whitelist.IPWhiteList.IPStrategy = &dynamic.IPStrategy{
+		Depth: 1,
 	}
 
 	return whitelist

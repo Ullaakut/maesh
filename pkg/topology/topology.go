@@ -54,8 +54,6 @@ type Service struct {
 	TrafficSplits []*TrafficSplit
 	// List of TrafficSplit mentioning this service as a backend.
 	BackendOf []*TrafficSplit
-	// List of Pods that are explicitly allowed to reach this service.
-	Incoming []*Pod
 }
 
 // ServiceTrafficTarget represents a TrafficTarget applied a on Service. TrafficTargets have a Destination service
@@ -117,6 +115,8 @@ type TrafficSplit struct {
 
 	Service  *Service
 	Backends []TrafficSplitBackend
+	// List of Pods that are explicitly allowed to reach this service.
+	Incoming []*Pod
 }
 
 // TrafficSplitBackend is the backend of a TrafficSplit.
