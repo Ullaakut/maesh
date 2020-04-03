@@ -127,7 +127,7 @@ func (p *Provider) buildConfigForService(cfg *dynamic.Configuration, svc *topolo
 	if p.acl {
 		for _, tt := range svc.TrafficTargets {
 			if err := p.buildServicesAndRoutersForTrafficTargets(cfg, tt, scheme, trafficType, middlewares, maeshProxyIPs); err != nil {
-				p.logger.Errorf("Unable to build routers and services for service %s/%s and traffic-target %s: %v", svc.Namespace, svc.Name, tt.Name, err)
+				p.logger.Errorf("Unable to build routers and services for service %s/%s for traffic-target %s: %v", svc.Namespace, svc.Name, tt.Name, err)
 				continue
 			}
 		}

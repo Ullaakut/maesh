@@ -7,31 +7,25 @@ import (
 	"testing"
 	"time"
 
-	"github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
-
-	"k8s.io/apimachinery/pkg/runtime"
-
-	fakeSpecsClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned/fake"
-	fakeSplitClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned/fake"
-
-	fakeAccessClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned/fake"
-
 	"github.com/containous/maesh/pkg/controller"
-
-	accessInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
-	specsInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/informers/externalversions"
-	splitInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/informers/externalversions"
-
 	mk8s "github.com/containous/maesh/pkg/k8s"
 	"github.com/containous/maesh/pkg/provider"
 	"github.com/containous/maesh/pkg/topology"
 	"github.com/containous/traefik/v2/pkg/config/dynamic"
+	"github.com/deislabs/smi-sdk-go/pkg/apis/access/v1alpha1"
 	spec "github.com/deislabs/smi-sdk-go/pkg/apis/specs/v1alpha1"
+	fakeAccessClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/clientset/versioned/fake"
+	accessInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/access/informers/externalversions"
+	fakeSpecsClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/clientset/versioned/fake"
+	specsInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/specs/informers/externalversions"
+	fakeSplitClient "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/clientset/versioned/fake"
+	splitInformer "github.com/deislabs/smi-sdk-go/pkg/gen/client/split/informers/externalversions"
 	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/informers"
 	k8s "k8s.io/client-go/kubernetes"
