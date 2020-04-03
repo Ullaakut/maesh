@@ -1,9 +1,6 @@
 package integration
 
 import (
-	"fmt"
-
-	"github.com/containous/traefik/v2/pkg/config/dynamic"
 	"github.com/go-check/check"
 	checker "github.com/vdemeester/shakers"
 	corev1 "k8s.io/api/core/v1"
@@ -91,6 +88,7 @@ func (s *ACLDisabledSuite) TestSplitTraffic(c *check.C) {
 	config := s.testConfigurationWithReturn(c, "resources/acl/disabled/traffic-split.json")
 
 	s.checkBlockAllMiddleware(c, config)
+	s.checkHTTPReadinessService(c, config)
 
 	serverV1Svc := s.getService(c, "server-v1")
 	serverV1Pod := s.getPod(c, "server-v1")
@@ -101,72 +99,4 @@ func (s *ACLDisabledSuite) TestSplitTraffic(c *check.C) {
 	serverV2Pod := s.getPod(c, "server-v2")
 
 	s.checkHTTPServiceLoadBalancer(c, config, serverV2Svc, []*corev1.Pod{serverV2Pod})
-}
-
-func (s *ACLDisabledSuite) checkBlockAllMiddleware(c *check.C, config *dynamic.Configuration) {
-	middleware := config.HTTP.Middlewares["block-all-middleware"]
-	c.Assert(middleware, checker.NotNil)
-
-	c.Assert(middleware.IPWhiteList.SourceRange, checker.HasLen, 1)
-	c.Assert(middleware.IPWhiteList.SourceRange[0], checker.Equals, "255.255.255.255")
-}
-
-func (s *ACLDisabledSuite) checkHTTPReadinessService(c *check.C, config *dynamic.Configuration) {
-	service := config.HTTP.Services["readiness"]
-	c.Assert(service, checker.NotNil)
-
-	c.Assert(service.LoadBalancer.Servers, checker.HasLen, 1)
-	c.Assert(service.LoadBalancer.Servers[0].URL, checker.Equals, "http://127.0.0.1:8080")
-}
-
-func (s *ACLDisabledSuite) checkHTTPServiceLoadBalancer(c *check.C, config *dynamic.Configuration, svc *corev1.Service, pods []*corev1.Pod) {
-	for _, port := range svc.Spec.Ports {
-		svcKey := fmt.Sprintf("%s-%s-%d", svc.Namespace, svc.Name, port.Port)
-
-		service := config.HTTP.Services[svcKey]
-		c.Assert(service, checker.NotNil)
-
-		c.Assert(service.LoadBalancer.Servers, checker.HasLen, len(pods))
-
-		for _, pod := range pods {
-			wantURL := fmt.Sprintf("http://%s:%d", pod.Status.PodIP, port.TargetPort.IntVal)
-
-			var found bool
-
-			for _, server := range service.LoadBalancer.Servers {
-				if wantURL == server.URL {
-					found = true
-					break
-				}
-			}
-
-			c.Assert(found, checker.True)
-		}
-	}
-}
-
-func (s *ACLDisabledSuite) checkTCPServiceLoadBalancer(c *check.C, config *dynamic.Configuration, svc *corev1.Service, pods []*corev1.Pod) {
-	for _, port := range svc.Spec.Ports {
-		svcKey := fmt.Sprintf("%s-%s-%d", svc.Namespace, svc.Name, port.Port)
-
-		service := config.TCP.Services[svcKey]
-		c.Assert(service, checker.NotNil)
-
-		c.Assert(service.LoadBalancer.Servers, checker.HasLen, len(pods))
-
-		for _, pod := range pods {
-			wantURL := fmt.Sprintf("%s:%d", pod.Status.PodIP, port.TargetPort.IntVal)
-
-			var found bool
-
-			for _, server := range service.LoadBalancer.Servers {
-				if wantURL == server.Address {
-					found = true
-					break
-				}
-			}
-
-			c.Assert(found, checker.True)
-		}
-	}
 }

@@ -1,13 +1,9 @@
 package integration
 
 import (
-	"errors"
-	"fmt"
-	"regexp"
-	"time"
-
 	"github.com/go-check/check"
 	checker "github.com/vdemeester/shakers"
+	corev1 "k8s.io/api/core/v1"
 )
 
 // ACLEnabledSuite
@@ -36,91 +32,61 @@ func (s *ACLEnabledSuite) TearDownSuite(c *check.C) {
 func (s *ACLEnabledSuite) TestTrafficTarget(c *check.C) {
 	s.createResources(c, "resources/acl/enabled/traffic-target")
 	defer s.deleteResources(c, "resources/acl/enabled/traffic-target", true)
+	defer s.deleteShadowServices(c)
 
 	s.waitForPods(c, []string{"client-a", "client-b", "server"})
 
-	// Make sure client-a can hit the server on /api.
-	curlFromClientA := []string{
-		"exec", "-i", "pod/client-a", "-n", "ns", "--",
-		"curl", "--fail", "-sw", "'%{http_code}'", "server.ns.maesh:8080/api",
-	}
-	output, err := s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 20*time.Second)
-	c.Assert(err, checker.IsNil)
-	c.Assert(output, checker.Contains, "'200'")
+	cmd := s.startMaeshBinaryCmd(c, false, true)
+	err := cmd.Start()
 
-	// Make sure client-b can't hit the server.
-	curlFromClientB := []string{
-		"exec", "-i", "pod/client-b", "-n", "ns", "--",
-		"curl", "-sw", "'%{http_code}'", "server.ns.maesh:8080/api",
-	}
-	output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientB, 20*time.Second)
 	c.Assert(err, checker.IsNil)
-	c.Assert(output, checker.Contains, "Forbidden'403'")
+	defer s.stopMaeshBinary(c, cmd.Process)
 
-	// Make sure we can't hit anything but /api.
-	curlFromClientA = []string{
-		"exec", "-i", "pod/client-a", "-n", "ns", "--",
-		"curl", "-sw", "'%{http_code}'", "server.ns.maesh:8080",
-	}
-	output, err = s.try.WaitCommandExecuteReturn("kubectl", curlFromClientA, 20*time.Second)
-	c.Assert(err, checker.IsNil)
-	c.Assert(output, checker.Contains, "Forbidden'403'")
+	config := s.testConfigurationWithReturn(c, "resources/acl/enabled/traffic-target.json")
+
+	svc := s.getService(c, "server")
+	tt := s.getTrafficTarget(c, "traffic-target")
+	serverPod := s.getPod(c, "server")
+	clientAPod := s.getPod(c, "client-a")
+
+	s.checkBlockAllMiddleware(c, config)
+	s.checkHTTPReadinessService(c, config)
+	s.checkTrafficTargetLoadBalancer(c, config, tt, svc, []*corev1.Pod{serverPod})
+	s.checkTrafficTargetWhitelistDirect(c, config, tt, svc, []*corev1.Pod{clientAPod})
 }
 
 func (s *ACLEnabledSuite) TestTrafficSplit(c *check.C) {
 	s.createResources(c, "resources/acl/enabled/traffic-split")
 	defer s.deleteResources(c, "resources/acl/enabled/traffic-split", true)
+	defer s.deleteShadowServices(c)
 
 	s.waitForPods(c, []string{"client-a", "client-b", "server-v1", "server-v2"})
 
-	// Make sure client-a can hit the server.
-	err := s.try.Retry(func() error {
-		var fstCall, secCall string
-		var err error
+	cmd := s.startMaeshBinaryCmd(c, false, true)
+	err := cmd.Start()
 
-		fstCall, err = s.kubectlExec("ns", "pod/client-a", "curl", "--fail", "server.ns.maesh:8080")
-		if err != nil {
-			return err
-		}
-
-		secCall, err = s.kubectlExec("ns", "pod/client-a", "curl", "--fail", "server.ns.maesh:8080")
-		if err != nil {
-			return err
-		}
-
-		// Make sure each call ended up on a different backend.
-		backendHostReg := regexp.MustCompile(`Host: server-v([12])\.ns\.maesh:8080`)
-		backendsHit := make(map[string]bool)
-
-		matchFstCall := backendHostReg.FindStringSubmatch(fstCall)
-		if matchFstCall == nil {
-			return errors.New("unable to find Host header in response")
-		}
-		backendsHit[matchFstCall[1]] = true
-
-		matchSecCall := backendHostReg.FindStringSubmatch(secCall)
-		if matchSecCall == nil {
-			return errors.New("unable to find Host header in response")
-		}
-		backendsHit[matchSecCall[1]] = true
-
-		if len(backendsHit) != 2 {
-			return fmt.Errorf("expected to hit 2 different backends, got %d", len(backendsHit))
-		}
-		return nil
-	}, 30*time.Second)
 	c.Assert(err, checker.IsNil)
+	defer s.stopMaeshBinary(c, cmd.Process)
 
-	// Make sure client-b can't hit the server.
-	var output string
-	output, err = s.kubectlExec("ns", "client-b", "curl", "-sw", "'%{http_code}'", "server.ns.maesh:8080")
-	c.Assert(err, checker.IsNil)
-	c.Assert(output, checker.Contains, "Forbidden'403'")
-}
+	config := s.testConfigurationWithReturn(c, "resources/acl/enabled/traffic-split.json")
 
-func (s *ACLEnabledSuite) waitForPods(c *check.C, pods []string) {
-	for _, pod := range pods {
-		err := s.try.WaitPodIPAssigned(pod, "ns", 30*time.Second)
-		c.Assert(err, checker.IsNil)
-	}
+	s.checkBlockAllMiddleware(c, config)
+	s.checkHTTPReadinessService(c, config)
+
+	tt := s.getTrafficTarget(c, "traffic-target")
+	clientAPod := s.getPod(c, "client-a")
+
+	serverV1Svc := s.getService(c, "server-v1")
+	serverV1Pod := s.getPod(c, "server-v1")
+
+	s.checkTrafficTargetLoadBalancer(c, config, tt, serverV1Svc, []*corev1.Pod{serverV1Pod})
+	s.checkTrafficTargetWhitelistDirect(c, config, tt, serverV1Svc, []*corev1.Pod{clientAPod})
+	s.checkTrafficTargetWhitelistIndirect(c, config, tt, serverV1Svc, []*corev1.Pod{clientAPod})
+
+	serverV2Svc := s.getService(c, "server-v2")
+	serverV2Pod := s.getPod(c, "server-v2")
+
+	s.checkTrafficTargetLoadBalancer(c, config, tt, serverV2Svc, []*corev1.Pod{serverV2Pod})
+	s.checkTrafficTargetWhitelistDirect(c, config, tt, serverV2Svc, []*corev1.Pod{clientAPod})
+	s.checkTrafficTargetWhitelistIndirect(c, config, tt, serverV2Svc, []*corev1.Pod{clientAPod})
 }

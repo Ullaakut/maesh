@@ -1,8 +1,15 @@
 apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: client-a
+  namespace: test
+
+---
+apiVersion: v1
 kind: Pod
 metadata:
   name: client-a
-  namespace: ns
+  namespace: test
 spec:
   serviceAccountName: client-a
   containers:
@@ -11,13 +18,19 @@ spec:
       command:
         - "sleep"
         - "36000"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: client-b
+  namespace: test
 
 ---
 apiVersion: v1
 kind: Pod
 metadata:
   name: client-b
-  namespace: ns
+  namespace: test
 spec:
   serviceAccountName: client-b
   containers:

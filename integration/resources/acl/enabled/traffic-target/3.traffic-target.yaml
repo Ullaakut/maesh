@@ -2,7 +2,7 @@ apiVersion: specs.smi-spec.io/v1alpha1
 kind: HTTPRouteGroup
 metadata:
   name: http-route-group-api
-  namespace: ns
+  namespace: test
 matches:
   - name: api
     pathRegex: /api
@@ -13,11 +13,11 @@ apiVersion: access.smi-spec.io/v1alpha1
 kind: TrafficTarget
 metadata:
   name: traffic-target
-  namespace: ns
+  namespace: test
 destination:
   kind: ServiceAccount
   name: server
-  namespace: ns
+  namespace: test
 specs:
   - kind: HTTPRouteGroup
     name: http-route-group-api
@@ -26,4 +26,4 @@ specs:
 sources:
   - kind: ServiceAccount
     name: client-a
-    namespace: ns
+    namespace: test
