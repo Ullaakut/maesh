@@ -90,7 +90,10 @@ func (b *Builder) Build(ignored mk8s.IgnoreWrapper) (*Topology, error) {
 		for _, ts := range svc.TrafficSplits {
 			pods, err := b.getIncomingPodsForTrafficSplit(ts)
 			if err != nil {
-				b.logger.ForSubject(svc.Namespace, "Service", svc.Name).Errorf("Unable to get incoming pods: %v", err)
+				b.logger.
+					WithMetadata(svc.Annotations).
+					ForSubject(svc.Namespace, "Service", svc.Name).
+					Errorf("Unable to get incoming pods: %v", err)
 				continue
 			}
 
@@ -205,7 +208,9 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology, ignored mk8s.Ignore
 		// Build traffic target specs.
 		specs, err := b.buildTrafficTargetSpecs(topology, trafficTarget)
 		if err != nil {
-			b.logger.ForSubject(trafficTarget.Namespace, "TrafficTarget", trafficTarget.Name).Errorf("Unable to build Specs: %v", err)
+			b.logger.
+				ForSubject(trafficTarget.Namespace, "TrafficTarget", trafficTarget.Name).
+				Errorf("Unable to build Specs: %v", err)
 			continue
 		}
 
@@ -233,7 +238,10 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology, ignored mk8s.Ignore
 			// Find out which port can be used on the destination service.
 			destPorts, err := b.getTrafficTargetDestinationPorts(service, trafficTarget)
 			if err != nil {
-				b.logger.ForSubject(service.Namespace, "Service", service.Name).Errorf("Unable to get TrafficTarget %s/%s destination ports: %v", trafficTarget.Namespace, trafficTarget.Name, err)
+				b.logger.
+					WithMetadata(service.Annotations).
+					ForSubject(service.Namespace, "Service", service.Name).
+					Errorf("Unable to get TrafficTarget %s/%s destination ports: %v", trafficTarget.Namespace, trafficTarget.Name, err)
 				continue
 			}
 
@@ -274,7 +282,9 @@ func (b *Builder) evaluateTrafficTargets(topology *Topology, ignored mk8s.Ignore
 func (b *Builder) evaluateTrafficSplits(topology *Topology) {
 	for _, trafficSplit := range topology.TrafficSplits {
 		if err := b.evaluateTrafficSplit(topology, trafficSplit); err != nil {
-			b.logger.ForSubject(trafficSplit.Namespace, "TrafficSplit", trafficSplit.Name).Errorf("Unable to build TrafficSplit: %v", err)
+			b.logger.
+				ForSubject(trafficSplit.Namespace, "TrafficSplit", trafficSplit.Name).
+				Errorf("Unable to build TrafficSplit: %v", err)
 		}
 	}
 }

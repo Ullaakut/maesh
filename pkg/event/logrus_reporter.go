@@ -7,7 +7,8 @@ import "github.com/sirupsen/logrus"
 type LogrusReporter struct {
 	log logrus.FieldLogger
 
-	subject *Subject
+	subject  *Subject
+	metadata Metadata
 }
 
 // NewLogrusReporter returns a LogrusReporter given a logrus FieldLogger.
@@ -55,6 +56,17 @@ func (r LogrusReporter) ForSubject(ns, kind, name string) Reporter {
 			Kind:      kind,
 			Name:      name,
 		},
+		metadata: r.metadata,
+	}
+}
+
+// WithMetadata adds context about a subject to a new LogrusReporter and returns
+// it. It does not modify the original reporter.
+func (r LogrusReporter) WithMetadata(metadata Metadata) Reporter {
+	return LogrusReporter{
+		log:      r.log,
+		subject:  r.subject,
+		metadata: metadata,
 	}
 }
 

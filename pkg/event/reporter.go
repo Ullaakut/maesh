@@ -13,6 +13,10 @@ type Reporter interface {
 	// ForSubject adds context about a subject to a new reporter and returns
 	// it. It does not modify the original reporter.
 	ForSubject(ns, typ, name string) Reporter
+
+	// WithMetadata adds metadata to a new reporter and returns it. It does not
+	// modify the original reporter.
+	WithMetadata(metadata Metadata) Reporter
 }
 
 // Subject contains information about the subject of a reported event.
@@ -21,3 +25,6 @@ type Subject struct {
 	Kind      string
 	Name      string
 }
+
+// Metadata contains extra information about a reported event.
+type Metadata map[string]string
